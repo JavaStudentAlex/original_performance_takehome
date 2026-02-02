@@ -48,15 +48,10 @@ Skills are reusable instruction sets that agents follow for specific tasks.
 
 #### copilot-cli-subagent-running
 - **Path**: `.github/skills/copilot-cli-subagent-running/SKILL.md`
-- **Purpose**: Invoke agents via CLI with proper model selection
+- **Purpose**: Invoke agents via Copilot CLI with proper model selection and context packing
 - **Priority**: MANDATORY for all agent invocations
+- **Scope note**: Invocation only — this skill does **not** create/manage isolated git worktrees.
 - **Guardrail notes**: Always ensure `copilot-instructions.md` is loaded before invoking.
-
-#### using-git-worktrees
-- **Path**: `.github/skills/using-git-worktrees/SKILL.md`
-- **Purpose**: Create isolated workspaces for agent execution
-- **Workflow**: Create -> work -> commit -> patch -> apply
-- **Guardrail notes**: Worktrees may read `tests/` but must never edit it.
 
 #### task-md-tecc-formatting
 - **Path**: `.github/skills/task-md-tecc-formatting/SKILL.md`
@@ -215,7 +210,7 @@ Patches are stored in `.patches/` directory for audit trail:
 ### Patch Handling
 
 - Patches are derived from **committed worktree changes only** (uncommitted work is intentionally discarded during cleanup).
-- Patch files may be generated under `/tmp/` by default (see `.github/skills/using-git-worktrees/SKILL.md`).
+- Patch files may be generated under `/tmp/` by default, depending on the runner/wrapper you use.
 - For audit trails, you may copy a patch into `.github/agent-state/patches/` (do not commit patches unless the repo explicitly requires it).
 
 ### Worktree Lifecycle
