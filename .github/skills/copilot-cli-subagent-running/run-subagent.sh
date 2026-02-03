@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
 # run-subagent.sh - Wrapper script for running Copilot CLI subagents safely and reproducibly
 #
-# This script performs an *atomic* end-to-end workflow by default:
-#   1) Create an isolated git worktree on a new branch (from current HEAD)
-#   2) MANDATORY state sync: mirror current workspace state into the worktree
-#   3) Run the Copilot CLI agent inside the worktree
-#   4) Generate a patch from *committed changes only*
-#   5) Cleanup: remove worktree + delete branch (after patch exists)
-#
-# The goal is to make "create worktree" and "cleanup" non-separable, so we never
-# leave stray worktrees/branches behind.
+# This script runs the Copilot CLI agent directly in the current workspace
+# (repo root by default, or --workdir <path>) and produces a patch of the
+# directory-state diff (before/after snapshots; commits optional).
 #
 # Usage:
 #   ./run-subagent.sh --agent=<agent-name> --prompt "<prompt>"
@@ -19,9 +13,9 @@
 #   ./run-subagent.sh --agent=test-expert --workdir ./tests --prompt "Write unit tests"
 #   ./run-subagent.sh --agent=researcher --context-file STEP.md --prompt "Follow STEP.md"
 #
-# Debug / escape hatches:
-#   --keep-worktree   Keep the worktree and branch (no cleanup). Intended for debugging only.
-#   --no-worktree     Run directly in the current workspace (legacy behavior). Avoid in normal use.
+# Note:
+#   This wrapper always writes a patch capturing the workspace changes made
+#   during the run.
 
 set -euo pipefail
 
@@ -50,10 +44,6 @@ DENIED_TOOLS=(
     "shell(git push -f)"
 )
 
-# Worktree defaults
-DEFAULT_WORKTREE_BASE=".worktrees"
-DEFAULT_SYNC_MODE="auto"   # auto|rsync|git
-
 # ==============================================================================
 # Helper Functions
 # ==============================================================================
@@ -71,7 +61,7 @@ Required:
 Optional:
     --agent <name>              Custom agent name (from .github/agents/ or ~/.copilot/agents/)
     --model <model>             AI model override (default: $DEFAULT_MODEL)
-    --workdir <path>            Working directory inside the repo/worktree
+    --workdir <path>            Working directory inside the repo
     --context-file <file>       File containing additional context to prepend to prompt
     --allow-tool <tool>         Additional tool to allow (repeatable)
     --deny-tool <tool>          Additional tool to deny (repeatable)
@@ -80,13 +70,8 @@ Optional:
     --dry-run                   Print actions/command without executing
     --verbose                   Print debug information
 
-Worktree lifecycle (default behavior):
-    --branch <name>             Branch name for the worktree (default: subagent/<agent>/<timestamp>)
-    --worktree-base <dir>       Worktree base directory (default: $DEFAULT_WORKTREE_BASE)
-    --sync <mode>               Sync mode: auto|rsync|git (default: $DEFAULT_SYNC_MODE)
+Output:
     --patch-out <path>          Where to write the patch (default: .github/agent-state/patches/<ts>-<agent>.patch)
-    --keep-worktree             Keep worktree + branch after run (debug only)
-    --no-worktree               Run directly in current workspace (legacy; not recommended)
 
 Examples:
     $(basename "$0") --agent=ml-expert --prompt "Implement the loss function"
@@ -148,29 +133,6 @@ ensure_in_git_repo() {
     fi
 }
 
-sanitize_branch_name() {
-    # Keep branch names git-safe and filesystem-safe.
-    # - Replace spaces and unsafe chars with '-'
-    # - Collapse repeated '-'
-    # - Strip leading/trailing '-'
-    local raw="$1"
-    local cleaned
-
-    cleaned=$(echo "$raw" \
-        | tr '[:upper:]' '[:lower:]' \
-        | sed -E 's#[^a-z0-9._/-]+#-#g; s#-+#-#g; s#(^-|-$)##g')
-
-    # Avoid empty branch names.
-    if [[ -z "$cleaned" ]]; then
-        cleaned="subagent/auto"
-    fi
-
-    # Git dislikes '..' segments and branch components ending with '.'.
-    cleaned=$(echo "$cleaned" \
-        | sed -E 's#\.{2,}#-#g; s#(^|/)\.#\1-#g; s#\.+$##g')
-    echo "$cleaned"
-}
-
 make_timestamp() {
     date -u +"%Y%m%dT%H%M%SZ"
 }
@@ -213,93 +175,25 @@ run_with_timeout() {
     wait "$pid"
 }
 
-sync_workspace_state() {
-    # Sync current workspace state into worktree.
-    # Invariants:
-    # - Must run immediately after worktree add
-    # - Fail-closed: if sync fails, remove worktree and branch
-    local project_root="$1"
-    local worktree_path="$2"
-    local worktree_base="$3"
-    local mode="$4"   # auto|rsync|git
+snapshot_directory_state() {
+    # Snapshot current directory state into a git tree object.
+    # Captures tracked + untracked files; excludes ignored files.
+    # Uses a temporary alternate index so it does not disturb the repo's real index.
+    local repo="$1"
+    local tmpdir
+    local idx
 
-    log_info "Syncing workspace state into worktree (mandatory)..."
+    tmpdir="$(mktemp -d -t subagent-index.XXXXXX)"
+    idx="$tmpdir/index"
 
-    # Safety: worktree must start clean.
-    if [[ -n "$(git -C "$worktree_path" status --porcelain)" ]]; then
-        log_error "Fresh worktree is not clean. This should not happen."
-        return 1
-    fi
+    # Populate the temporary index with the current working tree contents.
+    GIT_INDEX_FILE="$idx" git -C "$repo" add -A >/dev/null
 
-    local sync_ok=false
+    local tree
+    tree="$(GIT_INDEX_FILE="$idx" git -C "$repo" write-tree)"
 
-    # Prefer rsync when available unless mode forces git.
-    if [[ "$mode" == "rsync" || "$mode" == "auto" ]]; then
-        if command -v rsync &>/dev/null; then
-            # Run rsync from the repo root so ".gitignore" filter resolves correctly.
-            if (cd "$project_root" && rsync -a --delete --itemize-changes \
-                --exclude="${worktree_base%/}/" \
-                --exclude='.git/' --exclude='.git' \
-                --filter=':- .gitignore' \
-                ./ "${worktree_path%/}/"); then
-                sync_ok=true
-                log_info "Worktree synced via rsync."
-            else
-                log_warn "rsync failed."
-            fi
-        else
-            log_verbose "rsync not available."
-        fi
-    fi
-
-    # Fallback: git-based sync
-    if [[ "$sync_ok" != "true" ]]; then
-        if [[ "$mode" == "git" || "$mode" == "auto" ]]; then
-            log_info "Attempting git-based sync fallback..."
-            local temp_patch
-            temp_patch="/tmp/workspace-state-$$.patch"
-            git -C "$project_root" diff HEAD > "$temp_patch" || true
-
-            # Copy untracked files (respecting .gitignore)
-            while IFS= read -r file; do
-                [[ -z "$file" ]] && continue
-                mkdir -p "$worktree_path/$(dirname "$file")"
-                cp "$project_root/$file" "$worktree_path/$file" 2>/dev/null || true
-            done < <(git -C "$project_root" ls-files --others --exclude-standard)
-
-            if [[ -s "$temp_patch" ]]; then
-                if git -C "$worktree_path" apply --3way "$temp_patch" 2>/dev/null \
-                    || git -C "$worktree_path" apply --reject "$temp_patch" 2>/dev/null; then
-                    sync_ok=true
-                fi
-            else
-                # No tracked diffs; still consider sync successful.
-                sync_ok=true
-            fi
-
-            rm -f "$temp_patch"
-            if [[ "$sync_ok" == "true" ]]; then
-                log_info "Worktree synced via git fallback."
-            else
-                log_error "Git-based sync fallback failed."
-            fi
-        else
-            log_error "Sync mode is '$mode' but rsync was unavailable/failed."
-        fi
-    fi
-
-    [[ "$sync_ok" == "true" ]]
-}
-
-cleanup_worktree() {
-    local project_root="$1"
-    local worktree_path="$2"
-    local branch_name="$3"
-
-    log_info "Cleaning up worktree and branch..."
-    git -C "$project_root" worktree remove --force "$worktree_path" 2>/dev/null || true
-    git -C "$project_root" branch -D "$branch_name" 2>/dev/null || true
-    git -C "$project_root" worktree prune 2>/dev/null || true
+    rm -rf "$tmpdir"
+    echo "$tree"
 }
 
 # ==============================================================================
@@ -317,12 +211,6 @@ ALLOW_URLS="false"
 ALLOW_PATHS="false"
 DRY_RUN="false"
 VERBOSE="false"
-
-USE_WORKTREE="true"
-KEEP_WORKTREE="false"
-WORKTREE_BASE="$DEFAULT_WORKTREE_BASE"
-BRANCH_NAME=""
-SYNC_MODE="$DEFAULT_SYNC_MODE"
 PATCH_OUT=""
 
 while [[ $# -gt 0 ]]; do
@@ -363,27 +251,10 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN="true"; shift ;;
         --verbose)
             VERBOSE="true"; shift ;;
-
-        --branch)
-            BRANCH_NAME="$2"; shift 2 ;;
-        --branch=*)
-            BRANCH_NAME="${1#*=}"; shift ;;
-        --worktree-base)
-            WORKTREE_BASE="$2"; shift 2 ;;
-        --worktree-base=*)
-            WORKTREE_BASE="${1#*=}"; shift ;;
-        --sync)
-            SYNC_MODE="$2"; shift 2 ;;
-        --sync=*)
-            SYNC_MODE="${1#*=}"; shift ;;
         --patch-out)
             PATCH_OUT="$2"; shift 2 ;;
         --patch-out=*)
             PATCH_OUT="${1#*=}"; shift ;;
-        --keep-worktree)
-            KEEP_WORKTREE="true"; shift ;;
-        --no-worktree)
-            USE_WORKTREE="false"; shift ;;
 
         --help|-h)
             print_usage; exit 0 ;;
@@ -413,21 +284,13 @@ if [[ -n "$CONTEXT_FILE" ]] && [[ ! -f "$CONTEXT_FILE" ]]; then
 fi
 
 if [[ -n "$WORKDIR" ]]; then
-    # For worktree mode, WORKDIR is interpreted relative to repo root.
-    # Absolute paths are not allowed because they break isolation.
-    if [[ "$USE_WORKTREE" == "true" ]] && [[ "$WORKDIR" = /* ]]; then
-        log_error "--workdir must be a relative path when using worktrees"
+    # WORKDIR is interpreted relative to repo root.
+    # Absolute paths are not allowed.
+    if [[ "$WORKDIR" = /* ]]; then
+        log_error "--workdir must be a relative path"
         exit 1
     fi
 fi
-
-case "$SYNC_MODE" in
-    auto|rsync|git) ;;
-    *)
-        log_error "Invalid --sync mode: $SYNC_MODE (expected auto|rsync|git)"
-        exit 1
-        ;;
-esac
 
 # ==============================================================================
 # Build Copilot CLI Command
@@ -494,117 +357,38 @@ log_verbose "Agent: ${AGENT:-<auto>}"
 log_verbose "Denied tools: ${DENIED_TOOLS[*]} ${EXTRA_DENY_TOOLS[*]:-}"
 log_verbose "Extra allowed tools: ${EXTRA_ALLOW_TOOLS[*]:-<none>}"
 log_verbose "Max runtime: $TIMEOUT_HUMAN"
-log_verbose "Worktree enabled: $USE_WORKTREE"
+log_verbose "Working directory: ${WORKDIR:-.}"
 
 if [[ "$DRY_RUN" == "true" ]]; then
-    if [[ "$USE_WORKTREE" == "true" ]]; then
-        local_branch="${BRANCH_NAME:-subagent/${AGENT_FOR_NAMES}/${TS}}"
-        local_branch="$(sanitize_branch_name "$local_branch")"
-        local_worktree="$PROJECT_ROOT/${WORKTREE_BASE%/}/$local_branch"
-        echo "DRY RUN - Would perform atomic worktree workflow:" >&2
-        echo "  - create worktree: $local_worktree (branch: $local_branch)" >&2
-        echo "  - sync workspace state (mandatory)" >&2
-        echo "  - run: ${CMD[*]}" >&2
-        echo "  - write patch: $PATCH_OUT" >&2
-        echo "  - cleanup worktree + delete branch" >&2
-    else
-        echo "DRY RUN - Would execute:" >&2
-        echo "  cd ${WORKDIR:-.} && ${CMD[*]}" >&2
-    fi
+    echo "DRY RUN - Would execute in workspace:" >&2
+    echo "  cd ${WORKDIR:-.} && ${CMD[*]}" >&2
+    echo "  write patch (state diff): $PATCH_OUT" >&2
     exit 0
 fi
 
 exit_code=0
-worktree_path=""
-branch_name=""
-base_commit=""
-cleanup_needed="false"
-
-cleanup_trap() {
-    if [[ "$USE_WORKTREE" == "true" && "$KEEP_WORKTREE" != "true" && "$cleanup_needed" == "true" ]]; then
-        cleanup_worktree "$PROJECT_ROOT" "$worktree_path" "$branch_name"
-    fi
-}
-trap cleanup_trap EXIT
-
-if [[ "$USE_WORKTREE" == "false" ]]; then
-    # Legacy: run in current workspace.
-    if [[ -n "$WORKDIR" ]]; then
-        if [[ ! -d "$PROJECT_ROOT/$WORKDIR" ]]; then
-            log_error "Working directory not found: $WORKDIR"
-            exit 1
-        fi
-        cd "$PROJECT_ROOT/$WORKDIR"
-    else
-        cd "$PROJECT_ROOT"
-    fi
-    log_info "Running agent directly in workspace (no worktree)."
-    run_with_timeout "${CMD[@]}" || exit_code=$?
-    exit "$exit_code"
-fi
-
-# --- Worktree lifecycle ---
-
 base_commit="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
 
-branch_name="${BRANCH_NAME:-subagent/${AGENT_FOR_NAMES}/${TS}}"
-branch_name="$(sanitize_branch_name "$branch_name")"
-worktree_path="$PROJECT_ROOT/${WORKTREE_BASE%/}/$branch_name"
+# Snapshot directory state before the run (baseline for patch generation).
+STATE_OUT="$PROJECT_ROOT/.github/agent-state/subagents/${TS}-${AGENT_FOR_NAMES}.workspace-state.txt"
+mkdir -p "$(dirname "$STATE_OUT")"
+before_tree="$(snapshot_directory_state "$PROJECT_ROOT")"
+{
+    echo "base_commit=$base_commit"
+    echo "before_tree=$before_tree"
+} > "$STATE_OUT"
 
-mkdir -p "$PROJECT_ROOT/${WORKTREE_BASE%/}"
-
-# Ensure the worktree base is gitignored. This is important for rsync-based sync,
-# which relies on .gitignore as the single source of truth for exclusions.
-if ! git -C "$PROJECT_ROOT" check-ignore -q "${WORKTREE_BASE%/}/" 2>/dev/null; then
-    log_warn "Worktree base '${WORKTREE_BASE%/}/' is not ignored. Adding it to .gitignore."
-    if [[ ! -f "$PROJECT_ROOT/.gitignore" ]]; then
-        touch "$PROJECT_ROOT/.gitignore"
-    fi
-    if ! grep -qxF "${WORKTREE_BASE%/}/" "$PROJECT_ROOT/.gitignore"; then
-        {
-            echo ""
-            echo "# Git worktrees"
-            echo "${WORKTREE_BASE%/}/"
-        } >> "$PROJECT_ROOT/.gitignore"
-    fi
-fi
-
-if git -C "$PROJECT_ROOT" worktree list --porcelain | grep -Fq "branch refs/heads/$branch_name"; then
-    log_error "Worktree already exists for branch: $branch_name"
-    exit 1
-fi
-
-if git -C "$PROJECT_ROOT" rev-parse --verify "$branch_name" >/dev/null 2>&1; then
-    log_error "Branch already exists: $branch_name"
-    exit 1
-fi
-
-log_info "Creating worktree..."
-log_info "  Branch: $branch_name"
-log_info "  Path:   $worktree_path"
-
-mkdir -p "$(dirname "$worktree_path")"
-git -C "$PROJECT_ROOT" worktree add "$worktree_path" -b "$branch_name" "$base_commit"
-cleanup_needed="true"
-
-if ! sync_workspace_state "$PROJECT_ROOT" "$worktree_path" "$WORKTREE_BASE" "$SYNC_MODE"; then
-    log_error "FATAL: Workspace sync failed. Removing invalid worktree/branch and aborting."
-    cleanup_worktree "$PROJECT_ROOT" "$worktree_path" "$branch_name"
-    cleanup_needed="false"
-    exit 1
-fi
-
-# Run agent inside worktree
-run_dir="$worktree_path"
+# Run agent inside workspace
+run_dir="$PROJECT_ROOT"
 if [[ -n "$WORKDIR" ]]; then
-    run_dir="$worktree_path/${WORKDIR#./}"
+    run_dir="$PROJECT_ROOT/${WORKDIR#./}"
     if [[ ! -d "$run_dir" ]]; then
-        log_error "Working directory not found in worktree: $WORKDIR"
+        log_error "Working directory not found in workspace: $WORKDIR"
         exit 1
     fi
 fi
 
-log_info "Running subagent in worktree..."
+log_info "Running subagent in workspace..."
 log_verbose "Run directory: $run_dir"
 
 pushd "$run_dir" >/dev/null
@@ -615,28 +399,23 @@ if [[ "$exit_code" -eq 124 ]]; then
     log_error "Subagent run timed out after $TIMEOUT_HUMAN"
 fi
 
-# Patch creation (commits only)
+after_tree="$(snapshot_directory_state "$PROJECT_ROOT")"
+echo "after_tree=$after_tree" >> "$STATE_OUT"
+
+if [[ "$before_tree" == "$after_tree" ]]; then
+    log_info "No directory changes detected between snapshots."
+else
+    log_info "Directory changes detected between snapshots."
+fi
+
+# Patch creation (workspace state diff)
 mkdir -p "$(dirname "$PATCH_OUT")"
 
-if git -C "$worktree_path" status --porcelain | grep -q .; then
-    log_warn "Uncommitted changes exist in worktree and will be discarded during cleanup."
-fi
-
-log_info "Writing patch (committed changes only): $PATCH_OUT"
-git -C "$worktree_path" diff "$base_commit" HEAD > "$PATCH_OUT"
+log_info "Writing patch (workspace state diff): $PATCH_OUT"
+git -C "$PROJECT_ROOT" diff --binary --no-color "$before_tree" "$after_tree" > "$PATCH_OUT"
 
 if [[ ! -s "$PATCH_OUT" ]]; then
-    log_warn "Patch is empty. The agent may not have committed changes."
-fi
-
-# Cleanup after patch exists
-if [[ "$KEEP_WORKTREE" == "true" ]]; then
-    log_warn "Keeping worktree (debug): $worktree_path"
-    log_warn "Keeping branch (debug):  $branch_name"
-    cleanup_needed="false"
-else
-    cleanup_worktree "$PROJECT_ROOT" "$worktree_path" "$branch_name"
-    cleanup_needed="false"
+    log_warn "Patch is empty. The agent may not have changed any files."
 fi
 
 log_info "Done. Patch: $PATCH_OUT"

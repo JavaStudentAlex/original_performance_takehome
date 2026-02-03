@@ -1,18 +1,17 @@
 # Copilot CLI Subagent Skill (compilers-expert)
 
-This skill defines how to run the repository's **single** Copilot CLI subagent (**`compilers-expert`**) safely and reproducibly via `./run-subagent.sh`.
+This skill defines how to run the repository's **single** Copilot CLI subagents safely and reproducibly via `.github/skills/copilot-cli-subagent-running/run-subagent.sh`.
 
-**Important update:** `run-subagent.sh` now performs an *atomic* worktree lifecycle by default:
+**Important update:** `run-subagent.sh` now runs the agent directly in the **current workspace** (repo root by default, or `--workdir <path>`) and produces a patch from a **directory-state diff**:
 
-1. **Create** an isolated worktree (new branch from current HEAD)
-2. **Sync** current workspace state into the worktree (mandatory)
-3. **Run** the Copilot CLI agent inside the worktree
-4. **Patch**: write a patch from **committed changes only**
-5. **Cleanup**: remove the worktree + delete the branch (after the patch exists)
+1. Snapshot workspace directory state (**before**) the agent run
+2. Run the Copilot CLI agent in the workspace
+3. Snapshot workspace directory state (**after**) the agent run
+4. Write a patch from **before -> after** (binary-safe)
 
-If the worktree base directory (default: `.worktrees/`) is not gitignored, the wrapper will add it to `.gitignore` to keep rsync-based sync safe and non-recursive.
+The wrapper also writes a small state file at `.github/agent-state/subagents/<timestamp>-<agent>.workspace-state.txt` that records `base_commit`, `before_tree`, and `after_tree` used for patch generation.
 
-**Repo contract:** `copilot-instructions.md` is the top-level contract for how work is done in this repo. This skill must stay consistent with it and should **not** duplicate repository rules or architecture theory—reference `VLIW.md` instead.
+**Repo contract:** `copilot-instructions.md` is the top-level contract for how work is done in this repo. This skill must stay consistent with it and should **not** duplicate repository rules or architecture theory--reference `VLIW.md` instead.
 
 ---
 
@@ -31,10 +30,10 @@ If you just need edits, formatting, or non-compiler work, do **not** spawn the a
 
 ## Hard rules
 
-1. **Always invoke via the wrapper script**: `./run-subagent.sh`  
+1. **Always invoke via the wrapper script**: `.github/skills/copilot-cli-subagent-running/run-subagent.sh`  
    Never call the raw `copilot ...` command directly.
-2. **Isolation is the default**:  
-   Runs must happen in an isolated worktree (create + mandatory sync + cleanup). Use `--no-worktree` only for debugging or exceptional cases.
+2. **Workspace execution**:  
+   Runs happen in the current workspace. If you need isolation, run from a clean branch or a clean clone.
 3. **Keep outputs small in terminal/chat**:  
    Redirect full stdout/stderr to `.github/agent-state/` and summarize from the log.
 4. **Ground truth remains ground truth**:  
@@ -42,11 +41,9 @@ If you just need edits, formatting, or non-compiler work, do **not** spawn the a
 5. **Reference, don't duplicate**:  
    Point the agent to `copilot-instructions.md` and `VLIW.md` instead of restating theory.
 
-**Worktree invariants (non-negotiable):**
+**Workspace snapshot invariants (non-negotiable):**
 
-- **Create + sync are atomic.** A worktree without state sync is invalid.
-- **Fail-closed on sync failure.** If state sync cannot be performed, the script removes the worktree/branch and exits non-zero.
-- **Patch contains commits only.** Uncommitted changes in the worktree are intentionally excluded and discarded during cleanup.
+- **Patch contains a directory-state diff.** The wrapper snapshots the workspace before and after the agent run, then diffs those snapshots to produce the patch (commits optional).
 
 ---
 
@@ -73,7 +70,6 @@ Run the agent and capture all output to a log file (recommended default).
 
 By default, the wrapper will also:
 
-- create a worktree under `.worktrees/` (then remove it)
 - write a patch to `.github/agent-state/patches/<timestamp>-<agent>.patch`
 
 The wrapper prints the patch path at the end of the run.
@@ -82,7 +78,7 @@ The wrapper prints the patch path at the end of the run.
 ts="$(date -u +"%Y%m%dT%H%M%SZ")"
 log=".github/agent-state/subagents/${ts}-compilers-expert.log"
 
-./run-subagent.sh \
+.github/skills/copilot-cli-subagent-running/run-subagent.sh \
   --agent=compilers-expert \
   --prompt "..." \
   >"$log" 2>&1
@@ -93,7 +89,7 @@ echo "log: $log"
 If you want streaming output while logging, use `tee`:
 
 ```bash
-./run-subagent.sh --agent=compilers-expert --prompt "..." 2>&1 \
+.github/skills/copilot-cli-subagent-running/run-subagent.sh --agent=compilers-expert --prompt "..." 2>&1 \
   | tee ".github/agent-state/subagents/${ts}-compilers-expert.log"
 ```
 
@@ -123,7 +119,7 @@ OUTPUT FORMAT:
 For larger context, prefer `--context-file` instead of pasting huge blocks into `--prompt`:
 
 ```bash
-./run-subagent.sh \
+.github/skills/copilot-cli-subagent-running/run-subagent.sh \
   --agent=compilers-expert \
   --context-file STEP.md \
   --prompt "Propose the minimal kernel changes described in STEP.md"
@@ -138,7 +134,7 @@ For larger context, prefer `--context-file` instead of pasting huge blocks into 
 | `--prompt <text>` | Task for the agent (required) | `--prompt "Optimize the hash loop"` |
 | `--agent <name>` | Custom agent name | `--agent=compilers-expert` |
 | `--model <model>` | AI model override | `--model claude-sonnet-4` |
-| `--workdir <path>` | Working directory inside the repo/worktree | `--workdir ./src` |
+| `--workdir <path>` | Working directory inside the repo | `--workdir ./src` |
 | `--context-file <file>` | Prepend file contents to prompt | `--context-file STEP.md` |
 | `--allow-tool <tool>` | Allow additional tool (repeatable) | `--allow-tool 'shell(npm run test:*)'` |
 | `--deny-tool <tool>` | Deny additional tool (repeatable) | `--deny-tool 'shell(docker)'` |
@@ -146,12 +142,7 @@ For larger context, prefer `--context-file` instead of pasting huge blocks into 
 | `--allow-paths` | Allow all path access | |
 | `--dry-run` | Print command without executing | |
 | `--verbose` | Print debug information | |
-| `--branch <name>` | Worktree branch name (default: `subagent/<agent>/<timestamp>`) | `--branch subagent/compilers-expert/try1` |
-| `--worktree-base <dir>` | Worktree base directory (default: `.worktrees`) | `--worktree-base .worktrees` |
-| `--sync <mode>` | Sync mode: `auto`\|`rsync`\|`git` (default: `auto`) | `--sync rsync` |
 | `--patch-out <path>` | Patch output path | `--patch-out .github/agent-state/patches/run1.patch` |
-| `--keep-worktree` | Keep worktree + branch (debug only) | `--keep-worktree` |
-| `--no-worktree` | Run directly in workspace (legacy; not recommended) | `--no-worktree` |
 
 ---
 
@@ -160,7 +151,7 @@ For larger context, prefer `--context-file` instead of pasting huge blocks into 
 `run-subagent.sh` has a default model configured internally (`claude-sonnet-4.5`). Override per run if needed:
 
 ```bash
-./run-subagent.sh --agent=compilers-expert --model gpt-5 --prompt "..."
+.github/skills/copilot-cli-subagent-running/run-subagent.sh --agent=compilers-expert --model gpt-5 --prompt "..."
 ```
 
 Availability depends on your Copilot plan / org policy.
@@ -177,7 +168,7 @@ The wrapper runs with broad tool access but **denies destructive commands by def
 Add more restrictions as needed:
 
 ```bash
-./run-subagent.sh \
+.github/skills/copilot-cli-subagent-running/run-subagent.sh \
   --agent=compilers-expert \
   --deny-tool 'shell(curl)' \
   --deny-tool 'shell(wget)' \
@@ -187,7 +178,7 @@ Add more restrictions as needed:
 Allow URLs only when you explicitly need network access:
 
 ```bash
-./run-subagent.sh --agent=compilers-expert --allow-urls --prompt "..."
+.github/skills/copilot-cli-subagent-running/run-subagent.sh --agent=compilers-expert --allow-urls --prompt "..."
 ```
 
 ---
@@ -208,6 +199,7 @@ Keep the agent description and tool list in the agent profile; keep this file fo
 Use `.github/agent-state/` as the audit trail:
 
 - Raw subagent logs: `.github/agent-state/subagents/<timestamp>-compilers-expert.log`
+- Workspace state files: `.github/agent-state/subagents/<timestamp>-<agent>.workspace-state.txt`
 - Patches: `.github/agent-state/patches/<timestamp>-<agent>.patch`
 - Optional short summaries: `.github/agent-state/NOTES.md`
 
@@ -219,7 +211,7 @@ Guideline: store the full output in the log, and only a short, high-signal summa
 
 `run-subagent.sh` enforces a **hard max runtime of 1 hour** per invocation.
 
-- If the command produces no output for a while, **do not assume it failed**—just wait for completion.
+- If the command produces no output for a while, **do not assume it failed**--just wait for completion.
 - If the run exceeds 1 hour, the wrapper terminates it and exits with code **124**.
 
 ---
@@ -231,7 +223,6 @@ Guideline: store the full output in the log, and only a short, high-signal summa
 | `GitHub Copilot CLI is not installed` | CLI missing | Install and ensure `copilot` is on PATH |
 | `Authentication failed` | Token/auth issue | Re-authenticate with `gh auth login` |
 | `Tool denied` | Missing permission | Add `--allow-tool ...` or adjust deny patterns |
-| `Workspace sync failed` | rsync unavailable/failed and fallback failed | Fix local environment (prefer installing `rsync`); rerun |
 | `124` exit code | Timeout | Reduce scope or split the task |
 
 ---

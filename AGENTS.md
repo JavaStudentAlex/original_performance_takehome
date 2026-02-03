@@ -50,7 +50,7 @@ Skills are reusable instruction sets that agents follow for specific tasks.
 - **Path**: `.github/skills/copilot-cli-subagent-running/SKILL.md`
 - **Purpose**: Invoke agents via Copilot CLI with proper model selection and context packing
 - **Priority**: MANDATORY for all agent invocations
-- **Scope note**: Invocation only — this skill does **not** create/manage isolated git worktrees.
+- **Scope note**: Invocation only — runs Copilot CLI subagents in the current workspace via the wrapper script and produces a patch from a directory-state diff.
 - **Guardrail notes**: Always ensure `copilot-instructions.md` is loaded before invoking.
 
 #### task-md-tecc-formatting
@@ -75,10 +75,10 @@ Skills are reusable instruction sets that agents follow for specific tasks.
 
 #### step-md-formatting
 - **Path**: `.github/skills/step-md-formatting/SKILL.md`
-- **Purpose**: Track execution of a single work step with status, assignments, cycles, verdicts, and worktree state
-- **Use when**: Starting execution of a planned step (P01, P02, etc.); tracking iterative refinement cycles; handing off work mid-step; recording verdicts and cycle outcomes; managing worktree lifecycle for isolated work
-- **Output**: `STEP.md` at repo root with step identity, implementer/critic assignments, microtask, DoD, cycle policy, verdict, and worktree tracking
-- **Pass criteria**: Status is one of `NOT_STARTED`/`IN_PROGRESS`/`DONE`/`BLOCKED`; Latest Verdict is one of `PASS`/`SOFT_FAIL`/`HARD_FAIL`/`N/A`; all required fields present; worktree paths real or explicitly `(none)`; completion requires cycles >= minimum AND passing verdict AND DoD satisfied
+- **Purpose**: Track execution of a single work step with status, assignments, cycles, verdicts, and execution context
+- **Use when**: Starting execution of a planned step (P01, P02, etc.); tracking iterative refinement cycles; handing off work mid-step; recording verdicts and cycle outcomes;
+- **Output**: `STEP.md` at repo root with step identity, implementer/critic assignments, microtask, DoD, cycle policy, verdict, and execution-context tracking
+- **Pass criteria**: Status is one of `NOT_STARTED`/`IN_PROGRESS`/`DONE`/`BLOCKED`; Latest Verdict is one of `PASS`/`SOFT_FAIL`/`HARD_FAIL`/`N/A`; all required fields present; execution-context fields populated; completion requires cycles >= minimum AND passing verdict AND DoD satisfied
 
 #### report-md-formatting
 - **Path**: `.github/skills/report-md-formatting/SKILL.md`
@@ -89,9 +89,9 @@ Skills are reusable instruction sets that agents follow for specific tasks.
 
 #### impl-refine-cycle-running
 - **Path**: `.github/skills/impl-refine-cycle-running/SKILL.md`
-- **Purpose**: Run exactly one implementer+critic refinement cycle in isolated worktrees, persist cycle artifacts, and select/apply patch based on verdict
+- **Purpose**: Run exactly one implementer+critic refinement cycle, persist cycle artifacts, and select/apply patch based on verdict
 - **Use when**: Executing Phase C refinement cycles for a step; you need deterministic per-cycle outputs and patch handling
-- **Output**: `cycle-<NN>-service.md`, `cycle-<NN>-critic.md`, `cycle-<NN>-worktrees.md` written under `STATE_BASE_DIR` (default: `.github/agent-state/cycles/<STEP_ID>/`)
+- **Output**: `cycle-<NN>-service.md`, `cycle-<NN>-critic.md` written under `STATE_BASE_DIR` (default: `.github/agent-state/cycles/<STEP_ID>/`)
 - **Pass criteria**: Artifacts are written; verdict recorded; patch is applied only on `PASS`/`SOFT_FAIL` and never on `HARD_FAIL`; skill stops after one cycle (looping is caller responsibility)
 - **Guardrail notes**: Must not apply patches that touch `tests/`, change test interfaces, or modify constants.
 
@@ -175,7 +175,7 @@ Use the repo's contract in `copilot-instructions.md` as the source of truth for 
 
 ---
 
-## 4) Worktree Conventions
+## 4) Branch & Patch Conventions
 
 ### Branch Naming Convention
 
@@ -188,45 +188,23 @@ Format: `agent/<agent-name>/<phase-or-step-id>-cycle-<N>`
 - Implementation: `agent/ml-expert/P01-cycle-1`
 - Code review: `agent/ml-critic/P01-cycle-1`
 
-### Worktree Directory Structure
-
-```
-.worktrees/
-└── agent/
-    └── <agent-name>/
-        └── <phase-or-step-id>-cycle-<N>/
-```
-
 ### Patch Storage
 
-Patches are stored in `.patches/` directory for audit trail:
-```
-.patches/
-├── 20250115-143022-agent-ml-expert-P01-cycle-1.patch
-├── 20250115-144518-agent-test-expert-P02-cycle-1.patch
-└── ...
-```
+By default, patches and logs are stored under `.github/agent-state/`:
+
+- Patches: `.github/agent-state/patches/<timestamp>-<agent>.patch`
+- Logs / workspace state snapshots: `.github/agent-state/subagents/`
 
 ### Patch Handling
 
-- Patches are derived from **committed worktree changes only** (uncommitted work is intentionally discarded during cleanup).
-- Patch files may be generated under `/tmp/` by default, depending on the runner/wrapper you use.
-- For audit trails, you may copy a patch into `.github/agent-state/patches/` (do not commit patches unless the repo explicitly requires it).
-
-### Worktree Lifecycle
-
-1. Create worktree with unique branch, then **immediately sync** workspace state (atomic).
-2. Agent works and commits in worktree.
-3. Generate patch from commits.
-4. Apply patch to main (uncommitted) for user review.
-5. Cleanup worktree and branch.
+- Patches are derived from a **directory-state diff** (workspace snapshot **before** → **after**) produced by the Copilot CLI wrapper.
+- Treat patches as the review unit: apply only when the cycle verdict permits (`PASS` / `SOFT_FAIL`), and never apply on `HARD_FAIL`.
 
 ---
 
 ## 5) Global Notes
 
 - Never invent missing content; label unknowns as `(missing)` / `(to be confirmed)`.
-- `WORKTREE_PATH` and `WORKTREE_BRANCH` are mandatory wherever worktrees are used.
 - The guardrails in this document are intended to keep work deterministic and reviewable while preserving the repository's testing contract.
 
 ---
