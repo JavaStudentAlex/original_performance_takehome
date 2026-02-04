@@ -182,27 +182,23 @@ class KernelBuilder:
             for addr in op_writes[i]:
                 last_write[addr] = i
         
-        # WAR (write-after-read) tracking for inter-cycle ordering
-        # If op A reads X and later op B writes X, B depends on A to ensure
-        # B doesn't execute before A in an earlier cycle.
-        # Within the same cycle, WAR is fine (reads before writes), but the
-        # dependency ensures B is scheduled in the same or later cycle.
+        # WAR (write-after-read): allow same-cycle, forbid earlier-cycle.
+        # If op A reads X and later op B writes X, sequential semantics require
+        # cycle(B) >= cycle(A). We model this with a separate dependency set that
+        # can be satisfied within the same cycle (reads happen before writes).
+        war_pred = [set() for _ in range(n)]
         last_read = {}  # addr -> set of op indices that read it
         for i in range(n):
             engine, slot = slots[i]
             if engine == "debug":
                 continue
-            # WAR: write after read - if B writes what A read, B depends on A
             for addr in op_writes[i]:
                 if addr in last_read:
                     for reader in last_read[addr]:
                         if reader < i:
-                            pred[i].add(reader)
-            # Update last_read
+                            war_pred[i].add(reader)
             for addr in op_reads[i]:
-                if addr not in last_read:
-                    last_read[addr] = set()
-                last_read[addr].add(i)
+                last_read.setdefault(addr, set()).add(i)
         
         # Compute remaining dependencies count
         dep_count = [len(pred[i]) for i in range(n)]
@@ -230,50 +226,64 @@ class KernelBuilder:
             scheduled_this_cycle = []
             
             # Try to fill the bundle from ready ops
-            # Prioritize by: 1) critical path height, 2) engine type (LOAD first), 3) original order
+            # Prioritize by: 1) critical path height, 2) engine type, 3) original order
+            # Default heuristic: get LOADs out early, then arithmetic/VALU, then stores/flow.
             engine_priority = {"load": 0, "store": 1, "valu": 2, "alu": 3, "flow": 4, "debug": 5}
             ready.sort(key=lambda i: (-height[i], engine_priority.get(slots[i][0], 10), i))
             
-            new_ready = []
-            for i in ready:
-                engine, slot = slots[i]
-                if engine == "debug":
+            # Iteratively fill the bundle so same-cycle WAR constraints can be satisfied.
+            ready_set = ready
+            ready = []
+            progress = True
+            scheduled_this_cycle_set = set()
+            while progress and ready_set:
+                progress = False
+                new_ready = []
+                for i in ready_set:
+                    engine, slot = slots[i]
+                    if engine == "debug":
+                        bundle[engine].append(slot)
+                        scheduled[i] = True
+                        scheduled_this_cycle.append(i)
+                        scheduled_this_cycle_set.add(i)
+                        progress = True
+                        continue
+
+                    # Same-cycle WAR: require all earlier readers to be in a previous cycle or this cycle.
+                    if any((not scheduled[p]) and (p not in scheduled_this_cycle_set) for p in war_pred[i]):
+                        new_ready.append(i)
+                        continue
+
+                    limit = SLOT_LIMITS.get(engine, 1)
+                    if slot_counts[engine] >= limit:
+                        new_ready.append(i)
+                        continue
+
+                    writes = op_writes[i]
+                    reads = op_reads[i]
+
+                    # In VLIW, all reads happen before all writes within a cycle.
+                    # - RAW (reads & bundle_writes): forbidden (would read stale)
+                    # - WAR (writes & bundle_reads): allowed (reads see old value)
+                    # - WAW (writes & bundle_writes): forbidden
+                    if reads & bundle_writes:
+                        new_ready.append(i)
+                        continue
+                    if writes & bundle_writes:
+                        new_ready.append(i)
+                        continue
+
                     bundle[engine].append(slot)
+                    slot_counts[engine] += 1
+                    bundle_writes.update(writes)
+                    bundle_reads.update(reads)
                     scheduled[i] = True
                     scheduled_this_cycle.append(i)
-                    continue
-                
-                limit = SLOT_LIMITS.get(engine, 1)
-                if slot_counts[engine] >= limit:
-                    new_ready.append(i)
-                    continue
-                
-                writes = op_writes[i]
-                reads = op_reads[i]
-                
-                # Check dependencies within this bundle
-                # In VLIW, all reads happen before all writes within a cycle.
-                # So:
-                # - RAW (reads & bundle_writes): FORBIDDEN - read would see old value, not the write
-                # - WAR (writes & bundle_reads): ALLOWED - read sees old value, write happens after  
-                # - WAW (writes & bundle_writes): FORBIDDEN - two writes to same location undefined
-                if reads & bundle_writes:  # RAW hazard
-                    new_ready.append(i)
-                    continue
-                # WAR is allowed - removed the check
-                if writes & bundle_writes:  # WAW hazard
-                    new_ready.append(i)
-                    continue
-                
-                # Can schedule this op
-                bundle[engine].append(slot)
-                slot_counts[engine] += 1
-                bundle_writes.update(writes)
-                bundle_reads.update(reads)
-                scheduled[i] = True
-                scheduled_this_cycle.append(i)
+                    scheduled_this_cycle_set.add(i)
+                    progress = True
+                ready_set = new_ready
             
-            ready = new_ready
+            ready = ready_set
             
             if bundle:
                 instrs.append(dict(bundle))
@@ -515,7 +525,6 @@ class KernelBuilder:
         v_n_nodes = self.alloc_scratch("v_n_nodes", VLEN)
         self.add_bundle({"valu": [("vbroadcast", v_n_nodes, self.scratch["n_nodes"])]})
 
-        idx_addr = [[self.alloc_scratch(f"idx_addr_{b}_{lane}") for lane in range(VLEN)] for b in range(num_batches)]
         tmp_addr = self.alloc_scratch("tmp_addr")
         
         batch_offsets = [self.scratch_const(b * VLEN) for b in range(num_batches)]
@@ -531,16 +540,17 @@ class KernelBuilder:
         self.instrs.extend(self.build(init_ops, vliw=True))
 
         PIPE_DEPTH = 2
+        ADDR_RING = PIPE_DEPTH + 1
         
         tree_0 = self.alloc_scratch("tree_0")
         tree_1 = self.alloc_scratch("tree_1")
         tree_2 = self.alloc_scratch("tree_2")
         v_tmp3 = self.alloc_scratch("v_tmp3", VLEN)
-        v_tmp4 = self.alloc_scratch("v_tmp4", VLEN)
-        v_sel0 = self.alloc_scratch("v_sel0", VLEN)  # For vselect tree
-        v_sel1 = self.alloc_scratch("v_sel1", VLEN)  # For vselect tree
-        
-        tree_level = [self.alloc_scratch(f"tree_level_{i}") for i in range(32)]
+
+        idx_addr = [
+            [self.alloc_scratch(f"idx_addr_{s}_{lane}") for lane in range(VLEN)]
+            for s in range(ADDR_RING)
+        ]
 
         for round_num in range(rounds):
             round_ops = []
@@ -596,38 +606,103 @@ class KernelBuilder:
                     round_ops.append(("flow", ("vselect", v_idx[b], v_tmp1[tp], v_idx[b], v_zero)))
                     round_ops.append(("debug", ("vcompare", v_idx[b], tuple((round_num, batch_start + lane, "wrapped_idx") for lane in range(VLEN)))))
             else:
+                # General rounds: single gather load of current node value per lane (8 loads/batch).
                 total_steps = num_batches + PIPE_DEPTH
                 for step in range(total_steps):
                     addr_batch = step
                     load_batch = step - 1
                     compute_batch = step - PIPE_DEPTH
-                    
+
                     if addr_batch < num_batches:
                         b = addr_batch
+                        s = b % ADDR_RING
                         for lane in range(VLEN):
-                            round_ops.append(("alu", ("+", idx_addr[b][lane], self.scratch["forest_values_p"], v_idx[b] + lane)))
-                    
+                            round_ops.append(
+                                (
+                                    "alu",
+                                    (
+                                        "+",
+                                        idx_addr[s][lane],
+                                        self.scratch["forest_values_p"],
+                                        v_idx[b] + lane,
+                                    ),
+                                )
+                            )
+
                     if 0 <= load_batch < num_batches:
                         b = load_batch
+                        s = b % ADDR_RING
                         for lane in range(VLEN):
-                            round_ops.append(("load", ("load", v_node_val[b] + lane, idx_addr[b][lane])))
-                        round_ops.append(("debug", ("vcompare", v_node_val[b], tuple((round_num, b * VLEN + lane, "node_val") for lane in range(VLEN)))))
-                    
+                            round_ops.append(("load", ("load", v_node_val[b] + lane, idx_addr[s][lane])))
+                        round_ops.append(
+                            (
+                                "debug",
+                                (
+                                    "vcompare",
+                                    v_node_val[b],
+                                    tuple(
+                                        (round_num, b * VLEN + lane, "node_val")
+                                        for lane in range(VLEN)
+                                    ),
+                                ),
+                            )
+                        )
+
                     if 0 <= compute_batch < num_batches:
                         b = compute_batch
                         batch_start = b * VLEN
                         tp = b % N_TMP_POOLS  # Rotate through temp pool
                         round_ops.append(("valu", ("^", v_val[b], v_val[b], v_node_val[b])))
-                        round_ops.extend(self.build_vhash(v_val[b], v_tmp1[tp], v_tmp2[tp], round_num, batch_start))
-                        round_ops.append(("debug", ("vcompare", v_val[b], tuple((round_num, batch_start + lane, "hashed_val") for lane in range(VLEN)))))
-                        # Index update: idx = idx * 2 + ((val & 1) + 1) using multiply_add (3 ops vs 4)
+                        round_ops.extend(
+                            self.build_vhash(
+                                v_val[b], v_tmp1[tp], v_tmp2[tp], round_num, batch_start
+                            )
+                        )
+                        round_ops.append(
+                            (
+                                "debug",
+                                (
+                                    "vcompare",
+                                    v_val[b],
+                                    tuple(
+                                        (round_num, batch_start + lane, "hashed_val")
+                                        for lane in range(VLEN)
+                                    ),
+                                ),
+                            )
+                        )
+                        # Index update: idx = idx * 2 + ((val & 1) + 1) using multiply_add.
                         round_ops.append(("valu", ("&", v_tmp1[tp], v_val[b], v_one)))
                         round_ops.append(("valu", ("+", v_tmp1[tp], v_tmp1[tp], v_one)))
                         round_ops.append(("valu", ("multiply_add", v_idx[b], v_idx[b], v_two, v_tmp1[tp])))
-                        round_ops.append(("debug", ("vcompare", v_idx[b], tuple((round_num, batch_start + lane, "next_idx") for lane in range(VLEN)))))
+                        round_ops.append(
+                            (
+                                "debug",
+                                (
+                                    "vcompare",
+                                    v_idx[b],
+                                    tuple(
+                                        (round_num, batch_start + lane, "next_idx")
+                                        for lane in range(VLEN)
+                                    ),
+                                ),
+                            )
+                        )
                         round_ops.append(("valu", ("<", v_tmp1[tp], v_idx[b], v_n_nodes)))
                         round_ops.append(("flow", ("vselect", v_idx[b], v_tmp1[tp], v_idx[b], v_zero)))
-                        round_ops.append(("debug", ("vcompare", v_idx[b], tuple((round_num, batch_start + lane, "wrapped_idx") for lane in range(VLEN)))))
+                        round_ops.append(
+                            (
+                                "debug",
+                                (
+                                    "vcompare",
+                                    v_idx[b],
+                                    tuple(
+                                        (round_num, batch_start + lane, "wrapped_idx")
+                                        for lane in range(VLEN)
+                                    ),
+                                ),
+                            )
+                        )
             
             self.instrs.extend(self.build(round_ops, vliw=True))
 
