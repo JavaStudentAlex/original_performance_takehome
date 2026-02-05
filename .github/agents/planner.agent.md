@@ -82,7 +82,7 @@ You produce executable plans with clear ownership, observable success criteria, 
 
 Follow these as the single source of truth:
 
-1. `.github/copilot-instructions.md`
+1. `.github/.github/copilot-instructions.md.md`
 2. `AGENTS.md`
 
 If instructions conflict, the above files win.

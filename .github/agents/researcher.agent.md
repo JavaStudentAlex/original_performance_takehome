@@ -44,10 +44,10 @@ You are the repository's **read-only investigation agent**. Given a work packet,
 
 Treat these files as the single source of truth and **reference them instead of restating them**:
 
-1. `.github/copilot-instructions.md` -- repo conventions, environment, default constraints
+1. `.github/.github/copilot-instructions.md.md` -- repo conventions, environment, default constraints
 2. `AGENTS.md` -- skills catalog, quality gates, conventions
 
-Conflict priority: `.github/copilot-instructions.md` and `AGENTS.md` win.
+Conflict priority: `.github/.github/copilot-instructions.md.md` and `AGENTS.md` win.
 
 ---
 

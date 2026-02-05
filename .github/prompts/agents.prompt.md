@@ -31,4 +31,5 @@ Higher-level workflows/orchestration prompts should **reference this file** so m
 | `control-flow-critic` | `claude-sonnet-4.5` | `.github/agents/control-flow-critic.agent.md` |
 | `docs-expert` | `gpt-5.2` | `.github/agents/docs-expert.agent.md` |
 | `docs-critic` | `claude-sonnet-4.5` | `.github/agents/docs-critic.agent.md` |
+| `pipeline-runner` | `default` | `.github/agents/pipeline-runner.agent.md` |
 | `project-manager` | `default` | `.github/agents/project-manager.agent.md` |

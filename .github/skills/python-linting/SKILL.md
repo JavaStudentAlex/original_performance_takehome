@@ -6,7 +6,7 @@ description: Runs Python linters/formatters and applies minimal code changes to 
 
 ## Overview
 
-This skill explains how to run and pass the repo's Python lint / type-check / docstring-style tooling (typically via **pre-commit**), while staying consistent with the repo's top-level contract in `copilot-instructions.md`.
+This skill explains how to run and pass the repo's Python lint / type-check / docstring-style tooling (typically via **pre-commit**), while staying consistent with the repo's top-level contract in `.github/copilot-instructions.md.md`.
 
 Key alignment points:
 - **Correctness is validated by tests** (see `tests/submission_tests.py`). Linting helps keep changes clean and reviewable, but it does not replace `python tests/submission_tests.py`.
@@ -124,5 +124,5 @@ isort <file> && black <file>
 
 ## Related resources
 
-- `copilot-instructions.md` — repo contract and correctness workflow
+- `.github/copilot-instructions.md.md` — repo contract and correctness workflow
 - `tests/submission_tests.py` — correctness validation entrypoint

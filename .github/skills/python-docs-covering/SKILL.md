@@ -8,7 +8,7 @@ description: Ensures Python documentation coverage by adding or improving docstr
 
 This repository is a performance-optimization take-home for a simulated **VLIW SIMD** machine.
 
-- `copilot-instructions.md` is the **top-level contract** for repo work.
+- `.github/copilot-instructions.md.md` is the **top-level contract** for repo work.
 - `VLIW.md` is the **optimization playbook** (reference it instead of duplicating it).
 - `tests/` and `problem.py` are the **ground truth** for correctness.
 
@@ -47,7 +47,7 @@ Module docstring (only if it adds value beyond the filename):
 Notes
 -----
 - Correctness is validated against the reference behavior in `problem.py`.
-- Performance work should follow `VLIW.md` and repo constraints in `copilot-instructions.md`.
+- Performance work should follow `VLIW.md` and repo constraints in `.github/copilot-instructions.md.md`.
 """
 ```
 
@@ -87,6 +87,6 @@ If you later decide on a threshold, configure it explicitly (e.g., in `.interrog
 
 ## Consistency rules
 
-- Don't contradict `copilot-instructions.md` (minimal diffs, keep outputs small, tests are ground truth).
+- Don't contradict `.github/copilot-instructions.md.md` (minimal diffs, keep outputs small, tests are ground truth).
 - Don't duplicate optimization guidance that belongs in `VLIW.md` - link to it instead.
 - Keep docstrings accurate; stale docstrings are worse than none.

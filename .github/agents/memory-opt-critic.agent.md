@@ -69,10 +69,10 @@ You are a MEMORY-OPT CRITIC AGENT: a rigorous, adversarial reviewer focused on p
 
 Treat these as the single source of truth and reference them instead of restating them:
 
-1. `copilot-instructions.md` — repo contract, correctness gate, architecture limits
+1. `.github/copilot-instructions.md.md` — repo contract, correctness gate, architecture limits
 2. `AGENTS.md` — agent guardrails and skills catalog
 
-If instructions conflict, `copilot-instructions.md` wins.
+If instructions conflict, `.github/copilot-instructions.md.md` wins.
 
 ---
 

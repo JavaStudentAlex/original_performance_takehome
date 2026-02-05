@@ -20,9 +20,9 @@ This skill standardizes how to define a **refined task** in `TASK.md` using the 
 
 ---
 
-## Alignment with `copilot-instructions.md`
+## Alignment with `.github/copilot-instructions.md.md`
 
-This skill treats `copilot-instructions.md` as the **top-level contract**. If anything in this skill conflicts with it, follow `copilot-instructions.md`.
+This skill treats `.github/copilot-instructions.md.md` as the **top-level contract**. If anything in this skill conflicts with it, follow `.github/copilot-instructions.md.md`.
 
 When writing `TASK.md`:
 
@@ -182,7 +182,7 @@ Create a centralized definition of the TECC-based TASK.md schema as a reusable s
 
 ## Constraints
 - Do not change existing workflow phase definitions.
-- If repository guidance conflicts, follow `copilot-instructions.md`.
+- If repository guidance conflicts, follow `.github/copilot-instructions.md.md`.
 
 ## Context
 The goal is to avoid schema drift by keeping one canonical TECC reference and updating copies (if any) to point to it.
