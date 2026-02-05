@@ -475,17 +475,30 @@ class KernelBuilder:
         """
         slots = []
         for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
-            vc1 = self.vec_const(val1)
-            vc3 = self.vec_const(val3)
-            # First pass: op1 and op3 for all batches (independent)
-            for v_val, v_tmp1, v_tmp2, batch_start in batches_info:
-                slots.append(("valu", (op1, v_tmp1, v_val, vc1)))
-                slots.append(("valu", (op3, v_tmp2, v_val, vc3)))
-            # Second pass: op2 for all batches (depends on op1, op3)
-            for v_val, v_tmp1, v_tmp2, batch_start in batches_info:
-                slots.append(("valu", (op2, v_val, v_tmp1, v_tmp2)))
-                keys = tuple((round_num, batch_start + lane, "hash_stage", hi) for lane in range(VLEN))
-                slots.append(("debug", ("vcompare", v_val, keys)))
+            # Optimization: For stages with pattern a = (a + const1) + (a << shift),
+            # use multiply_add: a = a * (1 + 2^shift) + const1 = 1 op instead of 3
+            if op1 == "+" and op2 == "+" and op3 == "<<":
+                # a = (a + val1) + (a << val3) = a * (1 + 2^val3) + val1
+                multiplier = 1 + (1 << val3)
+                vc_mult = self.vec_const(multiplier)
+                vc1 = self.vec_const(val1)
+                for v_val, v_tmp1, v_tmp2, batch_start in batches_info:
+                    slots.append(("valu", ("multiply_add", v_val, v_val, vc_mult, vc1)))
+                    keys = tuple((round_num, batch_start + lane, "hash_stage", hi) for lane in range(VLEN))
+                    slots.append(("debug", ("vcompare", v_val, keys)))
+            else:
+                # Standard 3-op pattern
+                vc1 = self.vec_const(val1)
+                vc3 = self.vec_const(val3)
+                # First pass: op1 and op3 for all batches (independent)
+                for v_val, v_tmp1, v_tmp2, batch_start in batches_info:
+                    slots.append(("valu", (op1, v_tmp1, v_val, vc1)))
+                    slots.append(("valu", (op3, v_tmp2, v_val, vc3)))
+                # Second pass: op2 for all batches (depends on op1, op3)
+                for v_val, v_tmp1, v_tmp2, batch_start in batches_info:
+                    slots.append(("valu", (op2, v_val, v_tmp1, v_tmp2)))
+                    keys = tuple((round_num, batch_start + lane, "hash_stage", hi) for lane in range(VLEN))
+                    slots.append(("debug", ("vcompare", v_val, keys)))
         return slots
 
     def build_kernel(
@@ -562,14 +575,21 @@ class KernelBuilder:
                 round_ops.append(("alu", ("+", tmp_addr, self.scratch["forest_values_p"], self.scratch_const(0))))
                 round_ops.append(("load", ("load", tree_0, tmp_addr)))
                 
+                # Broadcast and XOR for all batches first
                 for b in range(num_batches):
                     batch_start = b * VLEN
-                    tp = b % N_TMP_POOLS  # Rotate through temp pool
                     round_ops.append(("valu", ("vbroadcast", v_node_val[b], tree_0)))
                     round_ops.append(("debug", ("vcompare", v_node_val[b], tuple((round_num, batch_start + lane, "node_val") for lane in range(VLEN)))))
-                    
                     round_ops.append(("valu", ("^", v_val[b], v_val[b], v_node_val[b])))
-                    round_ops.extend(self.build_vhash(v_val[b], v_tmp1[tp], v_tmp2[tp], round_num, batch_start))
+                
+                # Interleaved hash across all batches
+                batches_info = [(v_val[b], v_node_val[b], v_val[b], b * VLEN) for b in range(num_batches)]
+                round_ops.extend(self.build_vhash_interleaved(batches_info, round_num))
+                
+                # Index updates for all batches
+                for b in range(num_batches):
+                    batch_start = b * VLEN
+                    tp = b % N_TMP_POOLS
                     round_ops.append(("debug", ("vcompare", v_val[b], tuple((round_num, batch_start + lane, "hashed_val") for lane in range(VLEN)))))
                     # Index update: idx = idx * 2 + ((val & 1) + 1) using multiply_add (3 ops vs 4)
                     round_ops.append(("valu", ("&", v_tmp1[tp], v_val[b], v_one)))
@@ -585,6 +605,7 @@ class KernelBuilder:
                 round_ops.append(("alu", ("+", tmp_addr, self.scratch["forest_values_p"], self.scratch_const(2))))
                 round_ops.append(("load", ("load", tree_2, tmp_addr)))
                 
+                # Select node value and XOR for all batches first.
                 for b in range(num_batches):
                     batch_start = b * VLEN
                     tp = b % N_TMP_POOLS  # Rotate through temp pool
@@ -593,9 +614,15 @@ class KernelBuilder:
                     round_ops.append(("valu", ("vbroadcast", v_node_val[b], tree_2)))
                     round_ops.append(("flow", ("vselect", v_node_val[b], v_tmp1[tp], v_tmp3, v_node_val[b])))
                     round_ops.append(("debug", ("vcompare", v_node_val[b], tuple((round_num, batch_start + lane, "node_val") for lane in range(VLEN)))))
-                    
                     round_ops.append(("valu", ("^", v_val[b], v_val[b], v_node_val[b])))
-                    round_ops.extend(self.build_vhash(v_val[b], v_tmp1[tp], v_tmp2[tp], round_num, batch_start))
+
+                batches_info = [(v_val[b], v_node_val[b], v_val[b], b * VLEN) for b in range(num_batches)]
+                round_ops.extend(self.build_vhash_interleaved(batches_info, round_num))
+
+                # Index updates for all batches.
+                for b in range(num_batches):
+                    batch_start = b * VLEN
+                    tp = b % N_TMP_POOLS
                     round_ops.append(("debug", ("vcompare", v_val[b], tuple((round_num, batch_start + lane, "hashed_val") for lane in range(VLEN)))))
                     # Index update: idx = idx * 2 + ((val & 1) + 1) using multiply_add (3 ops vs 4)
                     round_ops.append(("valu", ("&", v_tmp1[tp], v_val[b], v_one)))
@@ -650,59 +677,50 @@ class KernelBuilder:
 
                     if 0 <= compute_batch < num_batches:
                         b = compute_batch
-                        batch_start = b * VLEN
-                        tp = b % N_TMP_POOLS  # Rotate through temp pool
                         round_ops.append(("valu", ("^", v_val[b], v_val[b], v_node_val[b])))
-                        round_ops.extend(
-                            self.build_vhash(
-                                v_val[b], v_tmp1[tp], v_tmp2[tp], round_num, batch_start
-                            )
-                        )
-                        round_ops.append(
+
+                batches_info = [(v_val[b], v_node_val[b], v_val[b], b * VLEN) for b in range(num_batches)]
+                round_ops.extend(self.build_vhash_interleaved(batches_info, round_num))
+
+                for b in range(num_batches):
+                    batch_start = b * VLEN
+                    tp = b % N_TMP_POOLS  # Rotate through temp pool
+                    round_ops.append(
+                        (
+                            "debug",
                             (
-                                "debug",
-                                (
-                                    "vcompare",
-                                    v_val[b],
-                                    tuple(
-                                        (round_num, batch_start + lane, "hashed_val")
-                                        for lane in range(VLEN)
-                                    ),
-                                ),
-                            )
+                                "vcompare",
+                                v_val[b],
+                                tuple((round_num, batch_start + lane, "hashed_val") for lane in range(VLEN)),
+                            ),
                         )
-                        # Index update: idx = idx * 2 + ((val & 1) + 1) using multiply_add.
-                        round_ops.append(("valu", ("&", v_tmp1[tp], v_val[b], v_one)))
-                        round_ops.append(("valu", ("+", v_tmp1[tp], v_tmp1[tp], v_one)))
-                        round_ops.append(("valu", ("multiply_add", v_idx[b], v_idx[b], v_two, v_tmp1[tp])))
-                        round_ops.append(
+                    )
+                    # Index update: idx = idx * 2 + ((val & 1) + 1) using multiply_add.
+                    round_ops.append(("valu", ("&", v_tmp1[tp], v_val[b], v_one)))
+                    round_ops.append(("valu", ("+", v_tmp1[tp], v_tmp1[tp], v_one)))
+                    round_ops.append(("valu", ("multiply_add", v_idx[b], v_idx[b], v_two, v_tmp1[tp])))
+                    round_ops.append(
+                        (
+                            "debug",
                             (
-                                "debug",
-                                (
-                                    "vcompare",
-                                    v_idx[b],
-                                    tuple(
-                                        (round_num, batch_start + lane, "next_idx")
-                                        for lane in range(VLEN)
-                                    ),
-                                ),
-                            )
+                                "vcompare",
+                                v_idx[b],
+                                tuple((round_num, batch_start + lane, "next_idx") for lane in range(VLEN)),
+                            ),
                         )
-                        round_ops.append(("valu", ("<", v_tmp1[tp], v_idx[b], v_n_nodes)))
-                        round_ops.append(("flow", ("vselect", v_idx[b], v_tmp1[tp], v_idx[b], v_zero)))
-                        round_ops.append(
+                    )
+                    round_ops.append(("valu", ("<", v_tmp1[tp], v_idx[b], v_n_nodes)))
+                    round_ops.append(("flow", ("vselect", v_idx[b], v_tmp1[tp], v_idx[b], v_zero)))
+                    round_ops.append(
+                        (
+                            "debug",
                             (
-                                "debug",
-                                (
-                                    "vcompare",
-                                    v_idx[b],
-                                    tuple(
-                                        (round_num, batch_start + lane, "wrapped_idx")
-                                        for lane in range(VLEN)
-                                    ),
-                                ),
-                            )
+                                "vcompare",
+                                v_idx[b],
+                                tuple((round_num, batch_start + lane, "wrapped_idx") for lane in range(VLEN)),
+                            ),
                         )
+                    )
             
             self.instrs.extend(self.build(round_ops, vliw=True))
 
