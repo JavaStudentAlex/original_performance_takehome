@@ -9,10 +9,10 @@ This document defines the **available skills**, **quality gate patterns**, and *
 
 These guardrails apply to **all agents, all tools, and all workflows**. If anything conflicts, follow this section first.
 
-1. **Always load `.github/copilot-instructions.md.md`**
-   - Before doing any work, ensure `.github/copilot-instructions.md.md` has been read and is in the active context.
+1. **Always load `.github/copilot-instructions.md`**
+   - Before doing any work, ensure `.github/copilot-instructions.md` has been read and is in the active context.
    - If you are not certain it is loaded, re-open/read it (treat it as the top-level contract).
-   - When invoking Copilot CLI subagents, include `.github/copilot-instructions.md.md` in the context pack (e.g., via `--context-file` or explicit "READ: .github/copilot-instructions.md.md" in the prompt).
+   - When invoking Copilot CLI subagents, include `.github/copilot-instructions.md` in the context pack (e.g., via `--context-file` or explicit "READ: .github/copilot-instructions.md" in the prompt).
 
 2. **Never edit anything under `tests/`**
    - Do not modify, create, delete, rename, move, or reformat any file or folder inside `tests/`.
@@ -32,7 +32,7 @@ These guardrails apply to **all agents, all tools, and all workflows**. If anyth
 
 When in doubt about what to follow, use this precedence order:
 
-1. `.github/copilot-instructions.md.md` (repo top-level contract)
+1. `.github/copilot-instructions.md` (repo top-level contract)
 2. This `AGENTS.md` (mandatory guardrails + execution conventions)
 3. Individual skills under `.github/skills/` (procedures and formats)
 
@@ -51,7 +51,7 @@ Skills are reusable instruction sets that agents follow for specific tasks.
 - **Purpose**: Invoke agents via Copilot CLI with proper model selection and context packing
 - **Priority**: MANDATORY for all agent invocations
 - **Scope note**: Invocation only — runs Copilot CLI subagents in the current workspace via the wrapper script and produces a patch from a directory-state diff.
-- **Guardrail notes**: Always ensure `.github/copilot-instructions.md.md` is loaded before invoking.
+- **Guardrail notes**: Always ensure `.github/copilot-instructions.md` is loaded before invoking.
 
 #### task-md-tecc-formatting
 - **Path**: `.github/skills/task-md-tecc-formatting/SKILL.md`
@@ -126,12 +126,12 @@ Skills are reusable instruction sets that agents follow for specific tasks.
 
 ## 3) Quality Gate Patterns
 
-Use the repo's contract in `.github/copilot-instructions.md.md` as the source of truth for what is required. This section captures common patterns without overriding that contract.
+Use the repo's contract in `.github/copilot-instructions.md` as the source of truth for what is required. This section captures common patterns without overriding that contract.
 
 ### Core correctness gate (required)
 
 - Run the repository's authoritative correctness check(s) as specified by the repo.
-- In this repo, correctness is validated against the existing tests (read-only). A common entrypoint is `python tests/submission_tests.py` (if present), but always defer to `.github/copilot-instructions.md.md` for the exact command.
+- In this repo, correctness is validated against the existing tests (read-only). A common entrypoint is `python tests/submission_tests.py` (if present), but always defer to `.github/copilot-instructions.md` for the exact command.
 
 ### For Code Implementation Agents
 | Gate | Tool | Pass Criteria |
@@ -211,4 +211,4 @@ By default, patches and logs are stored under `.github/agent-state/`:
 
 ## References
 
-- Repo top-level contract: `.github/copilot-instructions.md.md`
+- Repo top-level contract: `.github/copilot-instructions.md`
