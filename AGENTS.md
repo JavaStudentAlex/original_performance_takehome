@@ -133,6 +133,24 @@ Use the repo's contract in `.github/copilot-instructions.md` as the source of tr
 - Run the repository's authoritative correctness check(s) as specified by the repo.
 - In this repo, correctness is validated against the existing tests (read-only). A common entrypoint is `python tests/submission_tests.py` (if present), but always defer to `.github/copilot-instructions.md` for the exact command.
 
+### Testing requirements for this repository
+
+**Running tests is mandatory** after any code change.
+
+| Test Suite | Must Pass? | Purpose |
+|------------|------------|---------|
+| `CorrectnessTests` | **Yes** | Validates functional correctness against the reference kernel |
+| `SpeedTests` | No | Compares cycle counts to existing benchmarks |
+
+**Commands:**
+- Correctness: `pytest tests/submission_tests.py::CorrectnessTests -v`
+- Performance: `pytest tests/submission_tests.py::SpeedTests -v`
+
+**SpeedTests interpretation:**
+- SpeedTests compare your implementation's cycle counts against established benchmark targets.
+- A "failing" SpeedTest does **not** indicate a regression if cycles improved from the prior implementation—it simply means the benchmark target has not yet been reached.
+- Even if cycle counts are lower than before your changes, the solution is still an improvement over the previous state.
+
 ### For Code Implementation Agents
 | Gate | Tool | Pass Criteria |
 |------|------|---------------|

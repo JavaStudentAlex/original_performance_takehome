@@ -98,8 +98,6 @@ For detailed optimization tactics (software pipelining, unroll-and-jam, if-conve
 
 ## Development workflow
 
-- **Correctness check**: run `python tests/submission_tests.py`
-- **Performance measurement**: use the repo's benchmark commands from README.md / tests.
 - **Debugging**: prefer trace-based debugging (`test_kernel_trace` + `watch_trace.py`) over printing per-cycle logs.
 
 ---
