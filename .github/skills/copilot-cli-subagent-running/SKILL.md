@@ -11,7 +11,7 @@ This skill defines how to run the repository's **single** Copilot CLI subagents 
 
 The wrapper also writes a small state file at `.github/agent-state/subagents/<timestamp>-<agent>.workspace-state.txt` that records `base_commit`, `before_tree`, and `after_tree` used for patch generation.
 
-**Repo contract:** `.github/copilot-instructions.md.md` is the top-level contract for how work is done in this repo. This skill must stay consistent with it and should **not** duplicate repository rules or architecture theory--reference `VLIW.md` instead.
+**Repo contract:** `.github/copilot-instructions.md` is the top-level contract for how work is done in this repo. This skill must stay consistent with it and should **not** duplicate repository rules or architecture theory--reference `VLIW.md` instead.
 
 ---
 
@@ -39,7 +39,7 @@ If you just need edits, formatting, or non-compiler work, do **not** spawn the a
 4. **Ground truth remains ground truth**:  
    Tests and reference behavior are authoritative; don't change them unless explicitly requested.
 5. **Reference, don't duplicate**:  
-   Point the agent to `.github/copilot-instructions.md.md` and `VLIW.md` instead of restating theory.
+   Point the agent to `.github/copilot-instructions.md` and `VLIW.md` instead of restating theory.
 
 **Workspace snapshot invariants (non-negotiable):**
 
@@ -104,7 +104,7 @@ TASK:
 - What you want the agent to do (one paragraph)
 
 CONTEXT:
-- What this repo is / where to look (mention: .github/copilot-instructions.md.md, VLIW.md, tests/)
+- What this repo is / where to look (mention: .github/copilot-instructions.md, VLIW.md, tests/)
 
 CONSTRAINTS:
 - "Small diffs", "no verbose logs to terminal", "don't edit tests/", etc.
@@ -241,5 +241,5 @@ Guideline: store the full output in the log, and only a short, high-signal summa
 
 If this repo's contracts change, update this file to remain consistent with:
 
-- `.github/copilot-instructions.md.md` (top-level work contract)
+- `.github/copilot-instructions.md` (top-level work contract)
 - `run-subagent.sh` (actual wrapper behavior)

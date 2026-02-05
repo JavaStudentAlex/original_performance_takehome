@@ -71,7 +71,7 @@ You deliver critiques that are candid, reproducible, and optimized for correctne
 
 Treat these as the single source of truth and reference them instead of restating their content:
 
-1. `.github/.github/copilot-instructions.md.md` - repo contract, allowed edits, primary correctness/perf commands
+1. `.github/.github/copilot-instructions.md` - repo contract, allowed edits, primary correctness/perf commands
 2. `AGENTS.md` - global guardrails, skills, conventions, quality gates
 
 If instructions conflict, the above files win over this agent specification.

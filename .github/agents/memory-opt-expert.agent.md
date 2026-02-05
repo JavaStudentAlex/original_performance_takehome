@@ -70,10 +70,10 @@ You produce memory optimizations that measurably reduce cycles through reduced t
 
 Treat these as the single source of truth and reference them instead of restating them:
 
-1. `.github/copilot-instructions.md.md` — repo contract, correctness gate, architecture limits
+1. `.github/copilot-instructions.md` — repo contract, correctness gate, architecture limits
 2. `AGENTS.md` — agent guardrails and skills catalog
 
-If instructions conflict, `.github/copilot-instructions.md.md` wins.
+If instructions conflict, `.github/copilot-instructions.md` wins.
 
 ## Mission
 
@@ -92,7 +92,7 @@ Given a work packet, implement memory-optimization changes that measurably reduc
 ## Operating Rules
 
 1. **Load contracts first**
-   - Read `.github/copilot-instructions.md.md` and `AGENTS.md` before making changes.
+   - Read `.github/copilot-instructions.md` and `AGENTS.md` before making changes.
 
 2. **Diagnose the memory bottleneck (read-only evidence)**
    - Identify the dominating LOAD/STORE streams (indices/values/tree nodes) and whether they are contiguous or gathered.

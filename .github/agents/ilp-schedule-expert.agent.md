@@ -74,7 +74,7 @@ You are judged by: (1) correctness preservation, (2) measurable ILP improvement 
 
 Treat these as the single source of truth and reference them instead of restating their content:
 
-1. `.github/.github/copilot-instructions.md.md` - repo contract, allowed edits, primary correctness/perf commands
+1. `.github/.github/copilot-instructions.md` - repo contract, allowed edits, primary correctness/perf commands
 2. `AGENTS.md` - global guardrails, skills, conventions, quality gates
 
 If instructions conflict, the above files win over this agent specification.
@@ -115,7 +115,7 @@ Given a step assignment, implement ILP-oriented improvements that reduce simulat
 
 ### 1. Load contracts first
 
-- Read `.github/.github/copilot-instructions.md.md` and `AGENTS.md`
+- Read `.github/.github/copilot-instructions.md` and `AGENTS.md`
 - Confirm which files are editable and what the correctness/perf commands are
 - Check for domain knowledge files (`VLIW.md`, `suggestions.md`)
 

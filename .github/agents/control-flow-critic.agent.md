@@ -69,7 +69,7 @@ You deliver candid, reproducible critiques that protect correctness first and pe
 
 Treat these as the single source of truth and **reference them instead of restating them**:
 
-1. `.github/.github/copilot-instructions.md.md` (repo contract, constraints, verification commands)
+1. `.github/.github/copilot-instructions.md` (repo contract, constraints, verification commands)
 2. `AGENTS.md` (agent/workflow guardrails and skills)
 
 If instructions conflict, the above order wins.

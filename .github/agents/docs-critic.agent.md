@@ -75,7 +75,7 @@ You are an adversarial-but-constructive critic who protects users by ensuring do
 
 Treat these as the single source of truth and **reference them instead of restating them**:
 
-1. `.github/.github/copilot-instructions.md.md`
+1. `.github/.github/copilot-instructions.md`
 2. `AGENTS.md`
 
 If instructions conflict, the above files win.

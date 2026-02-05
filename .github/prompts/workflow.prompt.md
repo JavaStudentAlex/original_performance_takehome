@@ -17,7 +17,7 @@ in this exact order:
 ### Ground Truth (load first)
 
 1. `AGENTS.md` -- skills catalog, quality gates, conventions
-2. `.github/copilot-instructions.md.md` -- repo coding standards and tooling rules
+2. `.github/copilot-instructions.md` -- repo coding standards and tooling rules
 
 ### Registries
 
@@ -80,7 +80,7 @@ Do NOT skip to Phase C before A and B gates pass.
 ## 1) Ground Truth (must be loaded)
 
 1. `AGENTS.md` -- skills catalog, quality gates, conventions
-2. `.github/copilot-instructions.md.md` -- repo coding standards and tooling rules
+2. `.github/copilot-instructions.md` -- repo coding standards and tooling rules
 
 These always win if conflicts arise.
 
@@ -102,7 +102,7 @@ These always win if conflicts arise.
 3. **Banner protocol**: Every assistant message starts with `ACTIVE AGENT: <agent-name>`.
 4. **No fabrication**: Missing content is labeled `(missing)`, never invented.
 5. **Fail-closed preflight**: If Preflight bootstrap is not satisfied, STOP (do not continue).
-6. **Repo guardrails**: Follow mandatory guardrails and quality gates from `AGENTS.md` and `.github/copilot-instructions.md.md`.
+6. **Repo guardrails**: Follow mandatory guardrails and quality gates from `AGENTS.md` and `.github/copilot-instructions.md`.
 
 ---
 
@@ -205,7 +205,7 @@ See `workflow-cycle-running` skill for restart procedures.
 ## References
 
 - `AGENTS.md`
-- `.github/copilot-instructions.md.md`
+- `.github/copilot-instructions.md`
 - `.github/prompts/agents.prompt.md`
 - `.github/prompts/artifacts.prompt.md`
 - `workflow-cycle-running` skill (resolved from `AGENTS.md` Skills Catalog)

@@ -69,7 +69,7 @@ You deliver branch-minimized, schedule-friendly kernels with verification eviden
 
 Treat these as single sources of truth and **reference them instead of restating them**:
 
-1. `.github/.github/copilot-instructions.md.md` (repo contract, constraints, verification commands)
+1. `.github/.github/copilot-instructions.md` (repo contract, constraints, verification commands)
 2. `AGENTS.md` (agent/workflow guardrails and skills)
 
 If instructions conflict, the above order wins.
