@@ -19,6 +19,7 @@ dev = [
     "numpydoc>=1.10.0",
     "pre-commit>=4.5.1",
     "pre-commit-hooks>=6.0.0",
+    "pydocstyle>=6.3.0",
 ]
 
 [tool.uv]
@@ -60,3 +61,7 @@ ignore_missing_imports = false
 [[tool.mypy.overrides]]
 module = ["findiff", "findiff.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["problem"]
+ignore_errors = true

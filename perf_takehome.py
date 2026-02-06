@@ -1,11 +1,10 @@
-"""
-# Anthropic's Original Performance Engineering Take-home (Release version)
+"""Anthropic's Original Performance Engineering Take-home (Release version).
 
 Copyright Anthropic PBC 2026. Permission is granted to modify and use, but not
 to publish or redistribute your solutions so it's hard to find spoilers.
 
-# Task
-
+Task
+----
 - Optimize the kernel (in KernelBuilder.build_kernel) as much as possible in the
   available time, as measured by test_kernel_cycles on a frozen separate copy
   of the simulator.
@@ -18,10 +17,10 @@ We recommend you look through problem.py next.
 
 from collections import defaultdict
 import random
+from typing import Any
 import unittest
 
 from problem import (
-    Engine,
     DebugInfo,
     SLOT_LIMITS,
     VLEN,
@@ -40,7 +39,7 @@ from problem import (
 class KernelBuilder:
     """
     Builds optimized VLIW SIMD instructions for the tree traversal kernel.
-    
+
     Optimization strategy:
     1. VLIW bundling: Pack multiple independent operations per cycle
     2. SIMD vectorization: Process VLEN=8 items simultaneously with VALU
@@ -60,17 +59,17 @@ class KernelBuilder:
         """Return debug information for scratch memory mapping."""
         return DebugInfo(scratch_map=self.scratch_debug)
 
-    def build(self, slots: list[tuple[Engine, tuple]], vliw: bool = False):
+    def build(self, slots: list[tuple[str, tuple[Any, ...]]], vliw: bool = False):
         """
         Pack operations into VLIW bundles respecting slot limits and dependencies.
-        
+
         Parameters
         ----------
         slots : list of (engine, slot) tuples
             Operations to pack into instruction bundles.
         vliw : bool
             If True, use VLIW packing; otherwise one op per bundle.
-            
+
         Returns
         -------
         list of dict
@@ -81,7 +80,7 @@ class KernelBuilder:
             for engine, slot in slots:
                 instrs.append({engine: [slot]})
             return instrs
-        
+
         def get_writes(engine, slot):
             """Get scratch addresses written by this operation."""
             if engine == "debug":
@@ -111,7 +110,7 @@ class KernelBuilder:
                 elif slot[0] == "add_imm":
                     return {slot[1]}
             return set()
-        
+
         def get_reads(engine, slot):
             """Get scratch addresses read by this operation."""
             if engine == "debug":
@@ -122,7 +121,7 @@ class KernelBuilder:
                 if slot[0] == "vbroadcast":
                     return {slot[2]}
                 if slot[0] == "multiply_add":
-                    reads = set()
+                    reads: set[int] = set()
                     for base in [slot[2], slot[3], slot[4]]:
                         reads.update(range(base, base + VLEN))
                     return reads
@@ -157,15 +156,15 @@ class KernelBuilder:
         instrs = []
         n = len(slots)
         scheduled = [False] * n
-        
+
         # Precompute reads/writes for all ops
         op_reads = [get_reads(slots[i][0], slots[i][1]) for i in range(n)]
         op_writes = [get_writes(slots[i][0], slots[i][1]) for i in range(n)]
-        
+
         # Build dependency graph: pred[i] = set of ops that must complete before i
-        pred = [set() for _ in range(n)]
-        last_write = {}  # addr -> op index that last wrote it
-        
+        pred: list[set[int]] = [set() for _ in range(n)]
+        last_write: dict[int, int] = {}  # addr -> op index that last wrote it
+
         for i in range(n):
             engine, slot = slots[i]
             if engine == "debug":
@@ -181,13 +180,13 @@ class KernelBuilder:
             # Update last_write
             for addr in op_writes[i]:
                 last_write[addr] = i
-        
+
         # WAR (write-after-read): allow same-cycle, forbid earlier-cycle.
         # If op A reads X and later op B writes X, sequential semantics require
         # cycle(B) >= cycle(A). We model this with a separate dependency set that
         # can be satisfied within the same cycle (reads happen before writes).
-        war_pred = [set() for _ in range(n)]
-        last_read = {}  # addr -> set of op indices that read it
+        war_pred: list[set[int]] = [set() for _ in range(n)]
+        last_read: dict[int, set[int]] = {}  # addr -> set of op indices that read it
         for i in range(n):
             engine, slot = slots[i]
             if engine == "debug":
@@ -199,34 +198,26 @@ class KernelBuilder:
                             war_pred[i].add(reader)
             for addr in op_reads[i]:
                 last_read.setdefault(addr, set()).add(i)
-        
+
         # Compute remaining dependencies count
         dep_count = [len(pred[i]) for i in range(n)]
-        
+
         # Build successor list for critical path
-        succ = [set() for _ in range(n)]
+        succ: list[set[int]] = [set() for _ in range(n)]
         for i in range(n):
             for p in pred[i]:
                 succ[p].add(i)
-        
+
         # Latency weights for critical path computation
-        # LOADs/STOREs are the bottleneck (2 slots/cycle), so weight them higher
-        # FLOW ops (branches) also critical for control flow
-        # ALU/VALU abundant, so lower weight
+        # Scarcity-weight by per-engine slot limits (loads/stores/flow prioritized).
+        base_limit = max(v for k, v in SLOT_LIMITS.items() if k != "debug")
+
         def get_latency_weight(engine):
-            if engine == "load":
-                return 3  # Highest: memory bottleneck
-            elif engine == "store":
-                return 3  # High: limited slots
-            elif engine == "flow":
-                return 2  # Medium: control critical
-            elif engine == "valu":
-                return 1  # Low: abundant
-            elif engine == "alu":
-                return 1  # Low: abundant
-            else:
+            if engine == "debug":
                 return 0
-        
+            limit = SLOT_LIMITS.get(engine, 1)
+            return (base_limit + limit - 1) // limit
+
         # Compute height (longest latency-weighted path to any leaf) for critical path priority
         height = [0] * n
         for i in range(n - 1, -1, -1):
@@ -235,23 +226,23 @@ class KernelBuilder:
                 height[i] = weight + max(height[s] for s in succ[i])
             else:
                 height[i] = weight
-        
+
         # Ready queue: ops with all dependencies satisfied
         ready = [i for i in range(n) if dep_count[i] == 0]
-        
+
         while ready:
-            bundle = defaultdict(list)
-            slot_counts = defaultdict(int)
-            bundle_writes = set()
+            bundle: dict[str, list[Any]] = defaultdict(list)
+            slot_counts: dict[str, int] = defaultdict(int)
+            bundle_writes: set[int] = set()
             bundle_reads = set()
             scheduled_this_cycle = []
-            
+
             # Try to fill the bundle from ready ops
             # Prioritize by: 1) critical path height, 2) engine type, 3) original order
             # Default heuristic: get LOADs out early, then arithmetic/VALU, then stores/flow.
             engine_priority = {"load": 0, "store": 1, "valu": 2, "alu": 3, "flow": 4, "debug": 5}
             ready.sort(key=lambda i: (-height[i], engine_priority.get(slots[i][0], 10), i))
-            
+
             # Iteratively fill the bundle so same-cycle WAR constraints can be satisfied.
             ready_set = ready
             ready = []
@@ -303,12 +294,12 @@ class KernelBuilder:
                     scheduled_this_cycle_set.add(i)
                     progress = True
                 ready_set = new_ready
-            
+
             ready = ready_set
-            
+
             if bundle:
                 instrs.append(dict(bundle))
-            
+
             # Update ready queue with newly enabled ops
             for i in scheduled_this_cycle:
                 for j in range(n):
@@ -316,7 +307,7 @@ class KernelBuilder:
                         pred[j].remove(i)
                         if len(pred[j]) == 0 and j not in ready:
                             ready.append(j)
-        
+
         return instrs
 
     def add(self, engine, slot):
@@ -330,14 +321,14 @@ class KernelBuilder:
     def alloc_scratch(self, name=None, length=1):
         """
         Allocate scratch memory.
-        
+
         Parameters
         ----------
         name : str, optional
             Name for debugging; if provided, registers in scratch map.
         length : int
             Number of words to allocate.
-            
+
         Returns
         -------
         int
@@ -354,14 +345,14 @@ class KernelBuilder:
     def scratch_const(self, val, name=None):
         """
         Get or create a scalar constant in scratch memory.
-        
+
         Parameters
         ----------
         val : int
             Constant value to store.
         name : str, optional
             Name for debugging.
-            
+
         Returns
         -------
         int
@@ -376,12 +367,12 @@ class KernelBuilder:
     def vec_const(self, val):
         """
         Get or create a vector constant (broadcast to VLEN words).
-        
+
         Parameters
         ----------
         val : int
             Constant value to broadcast.
-            
+
         Returns
         -------
         int
@@ -396,24 +387,24 @@ class KernelBuilder:
 
     def build_valu_select(self, dest, cond, a, b, tmp):
         """
-        Build VALU-based conditional select: dest = cond ? a : b
-        
+        Build VALU-based conditional select: dest = cond ? a : b.
+
         Assumes cond contains 0 or 1 values (not arbitrary non-zero).
         Uses formula: result = cond * (a - b) + b
-        
+
         Parameters
         ----------
         dest : int
             Destination vector address
         cond : int
             Condition vector (must be 0 or 1 values)
-        a : int  
+        a : int
             Value to select when cond=1
         b : int
             Value to select when cond=0
         tmp : int
             Temporary vector for computation
-            
+
         Returns
         -------
         list of (engine, slot) tuples
@@ -426,7 +417,7 @@ class KernelBuilder:
 
     def build_hash(self, val_hash_addr, tmp1, tmp2, round, i):
         """Build scalar hash function slots (deprecated, use build_vhash)."""
-        slots = []
+        slots: list[tuple[str, tuple[Any, ...]]] = []
         for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
             slots.append(("alu", (op1, tmp1, val_hash_addr, self.scratch_const(val1))))
             slots.append(("alu", (op3, tmp2, val_hash_addr, self.scratch_const(val3))))
@@ -437,7 +428,7 @@ class KernelBuilder:
     def build_vhash(self, v_val, v_tmp1, v_tmp2, round_num, batch_start):
         """
         Build vectorized hash function using VALU operations.
-        
+
         Parameters
         ----------
         v_val : int
@@ -450,13 +441,13 @@ class KernelBuilder:
             Current round number for debug tracing.
         batch_start : int
             Starting item index for debug tracing.
-            
+
         Returns
         -------
         list of (engine, slot) tuples
             Vector hash operations.
         """
-        slots = []
+        slots: list[tuple[str, tuple[Any, ...]]] = []
         for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
             # Optimization: For stages with pattern a = (a + const1) + (a << shift),
             # use multiply_add: a = a * (1 + 2^shift) + const1 = 1 op instead of 3
@@ -480,21 +471,21 @@ class KernelBuilder:
     def build_vhash_interleaved(self, batches_info, round_num):
         """
         Build hash operations for multiple batches with interleaved stages.
-        
+
         This generates operations stage-by-stage across all batches, which
         allows better VALU slot utilization by enabling parallelism between
         independent hash operations.
-        
+
         Parameters
         ----------
         batches_info : list of (v_val, v_tmp1, v_tmp2, batch_start) tuples
         round_num : int
-        
+
         Returns
         -------
         list of (engine, slot) tuples
         """
-        slots = []
+        slots: list[tuple[str, tuple[Any, ...]]] = []
         for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
             # Optimization: For stages with pattern a = (a + const1) + (a << shift),
             # use multiply_add: a = a * (1 + 2^shift) + const1 = 1 op instead of 3
@@ -525,11 +516,9 @@ class KernelBuilder:
     def build_kernel(
         self, forest_height: int, n_nodes: int, batch_size: int, rounds: int
     ):
-        """
-        Build optimized VLIW SIMD kernel with software pipelining.
-        """
+        """Build optimized VLIW SIMD kernel with software pipelining."""
         tmp1 = self.alloc_scratch("tmp1")
-        
+
         init_vars = [
             "rounds", "n_nodes", "batch_size", "forest_height",
             "forest_values_p", "inp_indices_p", "inp_values_p",
@@ -543,7 +532,7 @@ class KernelBuilder:
         self.add("flow", ("pause",))
 
         num_batches = batch_size // VLEN
-        
+
         v_idx = [self.alloc_scratch(f"v_idx_{b}", VLEN) for b in range(num_batches)]
         v_val = [self.alloc_scratch(f"v_val_{b}", VLEN) for b in range(num_batches)]
         v_node_val = [self.alloc_scratch(f"v_node_val_{b}", VLEN) for b in range(num_batches)]
@@ -551,8 +540,7 @@ class KernelBuilder:
         # More pools = more parallelism, limited by scratch space
         N_TMP_POOLS = 6
         v_tmp1 = [self.alloc_scratch(f"v_tmp1_{p}", VLEN) for p in range(N_TMP_POOLS)]
-        v_tmp2 = [self.alloc_scratch(f"v_tmp2_{p}", VLEN) for p in range(N_TMP_POOLS)]
-        
+
         v_zero = self.vec_const(0)
         v_one = self.vec_const(1)
         v_two = self.vec_const(2)
@@ -560,22 +548,24 @@ class KernelBuilder:
         self.add_bundle({"valu": [("vbroadcast", v_n_nodes, self.scratch["n_nodes"])]})
 
         tmp_addr = self.alloc_scratch("tmp_addr")
-        
+
         batch_offsets = [self.scratch_const(b * VLEN) for b in range(num_batches)]
 
-        init_ops = []
+        init_ops: list[tuple[str, tuple[Any, ...]]] = []
         for b in range(num_batches):
             init_ops.append(("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], batch_offsets[b])))
             init_ops.append(("load", ("vload", v_idx[b], tmp_addr)))
-            init_ops.append(("debug", ("vcompare", v_idx[b], tuple((0, b * VLEN + lane, "idx") for lane in range(VLEN)))))
+            keys = tuple((0, b * VLEN + lane, "idx") for lane in range(VLEN))
+            init_ops.append(("debug", ("vcompare", v_idx[b], keys)))
             init_ops.append(("alu", ("+", tmp_addr, self.scratch["inp_values_p"], batch_offsets[b])))
             init_ops.append(("load", ("vload", v_val[b], tmp_addr)))
-            init_ops.append(("debug", ("vcompare", v_val[b], tuple((0, b * VLEN + lane, "val") for lane in range(VLEN)))))
+            keys = tuple((0, b * VLEN + lane, "val") for lane in range(VLEN))
+            init_ops.append(("debug", ("vcompare", v_val[b], keys)))
         self.instrs.extend(self.build(init_ops, vliw=True))
 
         PIPE_DEPTH = 2
         ADDR_RING = PIPE_DEPTH + 1
-        
+
         tree_0 = self.alloc_scratch("tree_0")
         tree_1 = self.alloc_scratch("tree_1")
         tree_2 = self.alloc_scratch("tree_2")
@@ -587,45 +577,54 @@ class KernelBuilder:
         ]
 
         for round_num in range(rounds):
-            round_ops = []
-            
-            level_size = 1 << (round_num % 11)
-            level_start = level_size - 1
-            
+            round_ops: list[tuple[str, tuple[Any, ...]]] = []
+
             if round_num in (0, 11):
                 round_ops.append(("alu", ("+", tmp_addr, self.scratch["forest_values_p"], self.scratch_const(0))))
                 round_ops.append(("load", ("load", tree_0, tmp_addr)))
-                
+
                 # Broadcast and XOR for all batches first
                 for b in range(num_batches):
                     batch_start = b * VLEN
                     round_ops.append(("valu", ("vbroadcast", v_node_val[b], tree_0)))
-                    round_ops.append(("debug", ("vcompare", v_node_val[b], tuple((round_num, batch_start + lane, "node_val") for lane in range(VLEN)))))
+                    keys = tuple(
+                        (round_num, batch_start + lane, "node_val") for lane in range(VLEN)
+                    )
+                    round_ops.append(("debug", ("vcompare", v_node_val[b], keys)))
                     round_ops.append(("valu", ("^", v_val[b], v_val[b], v_node_val[b])))
-                
+
                 # Interleaved hash across all batches
                 batches_info = [(v_val[b], v_node_val[b], v_val[b], b * VLEN) for b in range(num_batches)]
                 round_ops.extend(self.build_vhash_interleaved(batches_info, round_num))
-                
+
                 # Index updates for all batches
                 for b in range(num_batches):
                     batch_start = b * VLEN
                     tp = b % N_TMP_POOLS
-                    round_ops.append(("debug", ("vcompare", v_val[b], tuple((round_num, batch_start + lane, "hashed_val") for lane in range(VLEN)))))
+                    keys = tuple(
+                        (round_num, batch_start + lane, "hashed_val") for lane in range(VLEN)
+                    )
+                    round_ops.append(("debug", ("vcompare", v_val[b], keys)))
                     # Index update: idx = idx * 2 + ((val & 1) + 1) using multiply_add (3 ops vs 4)
                     round_ops.append(("valu", ("&", v_tmp1[tp], v_val[b], v_one)))
                     round_ops.append(("valu", ("+", v_tmp1[tp], v_tmp1[tp], v_one)))
                     round_ops.append(("valu", ("multiply_add", v_idx[b], v_idx[b], v_two, v_tmp1[tp])))
-                    round_ops.append(("debug", ("vcompare", v_idx[b], tuple((round_num, batch_start + lane, "next_idx") for lane in range(VLEN)))))
+                    keys = tuple(
+                        (round_num, batch_start + lane, "next_idx") for lane in range(VLEN)
+                    )
+                    round_ops.append(("debug", ("vcompare", v_idx[b], keys)))
                     round_ops.append(("valu", ("<", v_tmp1[tp], v_idx[b], v_n_nodes)))
                     round_ops.append(("flow", ("vselect", v_idx[b], v_tmp1[tp], v_idx[b], v_zero)))
-                    round_ops.append(("debug", ("vcompare", v_idx[b], tuple((round_num, batch_start + lane, "wrapped_idx") for lane in range(VLEN)))))
+                    keys = tuple(
+                        (round_num, batch_start + lane, "wrapped_idx") for lane in range(VLEN)
+                    )
+                    round_ops.append(("debug", ("vcompare", v_idx[b], keys)))
             elif round_num in (1, 12):
                 round_ops.append(("alu", ("+", tmp_addr, self.scratch["forest_values_p"], self.scratch_const(1))))
                 round_ops.append(("load", ("load", tree_1, tmp_addr)))
                 round_ops.append(("alu", ("+", tmp_addr, self.scratch["forest_values_p"], self.scratch_const(2))))
                 round_ops.append(("load", ("load", tree_2, tmp_addr)))
-                
+
                 # Select node value and XOR for all batches first.
                 for b in range(num_batches):
                     batch_start = b * VLEN
@@ -634,7 +633,10 @@ class KernelBuilder:
                     round_ops.append(("valu", ("vbroadcast", v_tmp3, tree_1)))
                     round_ops.append(("valu", ("vbroadcast", v_node_val[b], tree_2)))
                     round_ops.append(("flow", ("vselect", v_node_val[b], v_tmp1[tp], v_tmp3, v_node_val[b])))
-                    round_ops.append(("debug", ("vcompare", v_node_val[b], tuple((round_num, batch_start + lane, "node_val") for lane in range(VLEN)))))
+                    keys = tuple(
+                        (round_num, batch_start + lane, "node_val") for lane in range(VLEN)
+                    )
+                    round_ops.append(("debug", ("vcompare", v_node_val[b], keys)))
                     round_ops.append(("valu", ("^", v_val[b], v_val[b], v_node_val[b])))
 
                 batches_info = [(v_val[b], v_node_val[b], v_val[b], b * VLEN) for b in range(num_batches)]
@@ -644,15 +646,24 @@ class KernelBuilder:
                 for b in range(num_batches):
                     batch_start = b * VLEN
                     tp = b % N_TMP_POOLS
-                    round_ops.append(("debug", ("vcompare", v_val[b], tuple((round_num, batch_start + lane, "hashed_val") for lane in range(VLEN)))))
+                    keys = tuple(
+                        (round_num, batch_start + lane, "hashed_val") for lane in range(VLEN)
+                    )
+                    round_ops.append(("debug", ("vcompare", v_val[b], keys)))
                     # Index update: idx = idx * 2 + ((val & 1) + 1) using multiply_add (3 ops vs 4)
                     round_ops.append(("valu", ("&", v_tmp1[tp], v_val[b], v_one)))
                     round_ops.append(("valu", ("+", v_tmp1[tp], v_tmp1[tp], v_one)))
                     round_ops.append(("valu", ("multiply_add", v_idx[b], v_idx[b], v_two, v_tmp1[tp])))
-                    round_ops.append(("debug", ("vcompare", v_idx[b], tuple((round_num, batch_start + lane, "next_idx") for lane in range(VLEN)))))
+                    keys = tuple(
+                        (round_num, batch_start + lane, "next_idx") for lane in range(VLEN)
+                    )
+                    round_ops.append(("debug", ("vcompare", v_idx[b], keys)))
                     round_ops.append(("valu", ("<", v_tmp1[tp], v_idx[b], v_n_nodes)))
                     round_ops.append(("flow", ("vselect", v_idx[b], v_tmp1[tp], v_idx[b], v_zero)))
-                    round_ops.append(("debug", ("vcompare", v_idx[b], tuple((round_num, batch_start + lane, "wrapped_idx") for lane in range(VLEN)))))
+                    keys = tuple(
+                        (round_num, batch_start + lane, "wrapped_idx") for lane in range(VLEN)
+                    )
+                    round_ops.append(("debug", ("vcompare", v_idx[b], keys)))
             else:
                 # General rounds: single gather load of current node value per lane (8 loads/batch).
                 total_steps = num_batches + PIPE_DEPTH
@@ -742,10 +753,10 @@ class KernelBuilder:
                             ),
                         )
                     )
-            
+
             self.instrs.extend(self.build(round_ops, vliw=True))
 
-        final_ops = []
+        final_ops: list[tuple[str, tuple[Any, ...]]] = []
         for b in range(num_batches):
             final_ops.append(("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], batch_offsets[b])))
             final_ops.append(("store", ("vstore", tmp_addr, v_idx[b])))
@@ -753,7 +764,9 @@ class KernelBuilder:
             final_ops.append(("store", ("vstore", tmp_addr, v_val[b])))
         self.instrs.extend(self.build(final_ops, vliw=True))
 
+
 BASELINE = 147734
+
 
 def do_kernel_test(
     forest_height: int,
@@ -763,6 +776,7 @@ def do_kernel_test(
     trace: bool = False,
     prints: bool = False,
 ):
+    """Run the kernel test and return cycle count."""
     print(f"{forest_height=}, {rounds=}, {batch_size=}")
     random.seed(seed)
     forest = Tree.generate(forest_height)
@@ -773,7 +787,7 @@ def do_kernel_test(
     kb.build_kernel(forest.height, len(forest.values), len(inp.indices), rounds)
     # print(kb.instrs)
 
-    value_trace = {}
+    value_trace: dict[Any, Any] = {}
     machine = Machine(
         mem,
         kb.instrs,
@@ -798,7 +812,10 @@ def do_kernel_test(
             print(machine.mem[inp_indices_p : inp_indices_p + len(inp.indices)])
             print(ref_mem[inp_indices_p : inp_indices_p + len(inp.indices)])
         # Updating these in memory isn't required, but you can enable this check for debugging
-        # assert machine.mem[inp_indices_p:inp_indices_p+len(inp.indices)] == ref_mem[inp_indices_p:inp_indices_p+len(inp.indices)]
+        # assert (
+        #     machine.mem[inp_indices_p:inp_indices_p+len(inp.indices)]
+        #     == ref_mem[inp_indices_p:inp_indices_p+len(inp.indices)]
+        # )
 
     print("CYCLES: ", machine.cycle)
     print("Speedup over baseline: ", BASELINE / machine.cycle)
@@ -806,10 +823,10 @@ def do_kernel_test(
 
 
 class Tests(unittest.TestCase):
+    """Unit tests for kernel correctness and performance."""
+
     def test_ref_kernels(self):
-        """
-        Test the reference kernels against each other
-        """
+        """Test the reference kernels against each other."""
         random.seed(123)
         for i in range(10):
             f = Tree.generate(4)
@@ -822,7 +839,7 @@ class Tests(unittest.TestCase):
             assert inp.values == mem[mem[6] : mem[6] + len(inp.values)]
 
     def test_kernel_trace(self):
-        # Full-scale example for performance testing
+        """Test kernel with trace enabled for performance profiling."""
         do_kernel_test(10, 16, 256, trace=True, prints=False)
 
     # Passing this test is not required for submission, see submission_tests.py for the actual correctness test
@@ -835,6 +852,7 @@ class Tests(unittest.TestCase):
     #             )
 
     def test_kernel_cycles(self):
+        """Test kernel cycle count for performance benchmarking."""
         do_kernel_test(10, 16, 256)
 
 
@@ -843,7 +861,8 @@ class Tests(unittest.TestCase):
 # To run a specific test:
 #    python perf_takehome.py Tests.test_kernel_cycles
 # To view a hot-reloading trace of all the instructions:  **Recommended debug loop**
-# NOTE: The trace hot-reloading only works in Chrome. In the worst case if things aren't working, drag trace.json onto https://ui.perfetto.dev/
+# NOTE: The trace hot-reloading only works in Chrome. In the worst case if things
+# aren't working, drag trace.json onto https://ui.perfetto.dev/
 #    python perf_takehome.py Tests.test_kernel_trace
 # Then run `python watch_trace.py` in another tab, it'll open a browser tab, then click "Open Perfetto"
 # You can then keep that open and re-run the test to see a new trace.
