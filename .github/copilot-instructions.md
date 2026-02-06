@@ -49,12 +49,62 @@ This repo is a performance-optimization take-home for a simulated **VLIW SIMD** 
 
 | File | Purpose | Editable |
 |------|---------|----------|
-| `perf_takehome.py` | Main file to edit (KernelBuilder implementation / optimized kernel) | Yes |
+| `perf_takehome.py` | Integration facade (KernelBuilder) - delegates to modules | Yes (minimal) |
+| `kernel_memory.py` | Scratch allocator & constant caching (~120 LOC) | Yes |
+| `kernel_scheduler.py` | VLIW instruction scheduling & bundling (~280 LOC) | Yes |
+| `kernel_hash.py` | Hash computation (scalar & vectorized) (~140 LOC) | Yes |
+| `kernel_traversal.py` | Tree traversal logic with software pipelining (~550 LOC) | Yes |
 | `problem.py` | Simulator + reference kernel; treat as ground truth | No (unless user asks) |
 | `tests/frozen_problem.py` | Frozen test infrastructure | No |
 | `tests/submission_tests.py` | Submission validation tests | No |
 | `VLIW.md` | Optimization theory and tactics (memory bottleneck, predication, pipelining, vectorization) | Reference only |
+| `MODULES.md` | Module architecture, ownership, and contracts | Reference only |
 | `watch_trace.py` / `watch_trace.html` | Trace visualization tooling | Read-only |
+
+---
+
+## Module architecture
+
+The kernel code has been refactored into **4 focused modules** for parallel development:
+
+**Core modules:**
+
+1. **`kernel_memory.py`** (~120 LOC) - Scratch allocator & constant caching
+   - Manages scratch space allocation with bounds checking
+   - Handles scalar/vector constant deduplication
+   - Provides debug symbol table maintenance
+
+2. **`kernel_scheduler.py`** (~280 LOC) - VLIW instruction scheduling & bundling
+   - Dependency analysis (RAW, WAR, WAW)
+   - Critical path computation with latency weighting
+   - List scheduling with slot limit enforcement
+   - Bundle formation respecting end-of-cycle write semantics
+
+3. **`kernel_hash.py`** (~140 LOC) - Hash computation (scalar & vectorized)
+   - Scalar hash operations (legacy compatibility)
+   - Vectorized hash with VALU operations
+   - Interleaved multi-batch hashing for better VALU utilization
+   - Hash stage optimization (multiply_add fusion)
+
+4. **`kernel_traversal.py`** (~550 LOC) - Tree traversal logic with software pipelining
+   - Initialization phase (load header, allocate scratch)
+   - Round generation with software pipelining (PIPE_DEPTH=2)
+   - Special round handling (0, 1, 11, 12 vs general rounds)
+   - Finalization phase (store results)
+
+**Integration layer:**
+- `perf_takehome.py` is now a **thin facade** (~240 LOC, down from ~880)
+- Delegates to: `ScratchAllocator`, `HashBuilder`, `VLIWScheduler`, `TraversalBuilder`
+- Maintains test interface compatibility (no test changes required)
+
+**Module-to-optimization mapping:**
+
+| When optimizing... | Edit these modules | Focus areas |
+|-------------------|-------------------|-------------|
+| **Memory traffic** | `kernel_memory.py`, `kernel_traversal.py` | Scratchpad layout, load scheduling, software pipelining, gather patterns |
+| **Vectorization** | `kernel_hash.py` | VALU utilization, hash stage fusion, interleaving |
+| **Scheduling** | `kernel_scheduler.py` | Dependency analysis, bundle formation, critical path heuristics |
+| **Control flow** | `kernel_traversal.py`, `kernel_hash.py` | Predication, branchless patterns, if-conversion |
 
 ---
 
