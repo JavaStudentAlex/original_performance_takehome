@@ -144,6 +144,12 @@ Use the repo's contract in `.github/copilot-instructions.md` as the source of tr
 - A "failing" SpeedTest does **not** indicate a regression if cycles improved from the prior implementation—it simply means the benchmark target has not yet been reached.
 - Even if cycle counts are lower than before your changes, the solution is still an improvement over the previous state.
 
+**No-op performance change rule (required):**
+- If a code change produces the **same cycle count as the prior baseline**, treat it as **no performance impact**.
+- For performance-optimization tasks, such a change is **not a meaningful result** and must **not** be reported as an optimization win.
+- Keep such a change only if it has a separate, explicit value (e.g., correctness fix, readability, maintainability) and label it clearly as **non-performance**.
+- If no separate value exists, discard/revert the change and continue optimization from the previous baseline.
+
 ### For Code Implementation Agents
 | Gate | Tool | Pass Criteria |
 |------|------|---------------|
