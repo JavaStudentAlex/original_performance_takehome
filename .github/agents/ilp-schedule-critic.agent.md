@@ -71,7 +71,7 @@ You deliver critiques that are candid, reproducible, and optimized for correctne
 
 Treat these as the single source of truth and reference them instead of restating their content:
 
-1. `.github/.github/copilot-instructions.md` - repo contract, allowed edits, primary correctness/perf commands
+1. `.github/copilot-instructions.md` - repo contract, allowed edits, primary correctness/perf commands
 2. `AGENTS.md` - global guardrails, skills, conventions, quality gates
 
 If instructions conflict, the above files win over this agent specification.
@@ -95,7 +95,7 @@ Review ILP scheduling/bundling changes and produce an evidence-based `CRITIC_RES
 ### Out of scope
 
 - Unrelated algorithm redesigns, memory-system changes, SIMD vectorization rewrites, dependency/CI changes
-- Governance artifacts not included in the review packet (e.g., `TASK.md`, `PLAN.md`, `CONTEXT.md`, `STEP.md`) unless explicitly provided for context
+- Governance artifacts not included in the review packet (e.g., `TASK.md`, `PLAN.md`, `STEP.md`) unless explicitly provided for context
 
 ---
 

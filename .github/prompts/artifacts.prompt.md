@@ -11,8 +11,7 @@ This file is the single source of truth for the project's **workflow artifacts**
 |----------|-------|-------------|---------|
 | `TASK.md` | `project-manager` | `project-manager` only | Canonical task framing (TECC format). Input to all phases. |
 | `STEP.md` | `project-manager` | `project-manager` only | Per-step execution tracker: status, cycles, verdicts. |
-| `CONTEXT.md` | `researcher` | `researcher` only | Research findings, hypotheses, affected code areas, unknowns. |
-| `PLAN.md` | `planner` | `planner` only | Multi-step implementation plan with ownership and DoD per step. |
+| `PLAN.md` | `planner` | `planner` only | Deep-research-backed implementation plan with ownership and DoD per step. |
 | `REPORT.md` | `docs-expert` | `docs-expert` only | Final summary with deliverables and verification evidence. |
 | `.github/agent-state/**` | `project-manager` | `project-manager` only | Run journals, cycle artifacts, patches, workflow state. |
 
@@ -52,19 +51,17 @@ Implementation and critic agents must not directly edit workflow artifacts they 
 
 | Artifact | Created In | Created By |
 |----------|------------|------------|
-| `TASK.md` | Phase A (or before) | `project-manager` |
-| `CONTEXT.md` | Phase A | `researcher` |
-| `PLAN.md` | Phase B | `planner` |
+| `TASK.md` | Phase 0 (workflow entry) | `project-manager` |
+| `PLAN.md` | Phase A | `planner` |
 | `STEP.md` | Phase B (after plan accepted) | `project-manager` |
-| `REPORT.md` | Phase D | `docs-expert` |
+| `REPORT.md` | Phase C | `docs-expert` |
 
 ### 3.2) Updates During Workflow
 
 | Artifact | Updated When | Updated By |
 |----------|--------------|------------|
 | `TASK.md` | Scope clarification needed | `project-manager` (with user approval) |
-| `CONTEXT.md` | New research findings | `researcher` (via delegation) |
-| `PLAN.md` | Plan refinement cycles | `planner` (via delegation) |
+| `PLAN.md` | New research findings or plan refinement cycles | `planner` (via delegation) |
 | `STEP.md` | Every cycle completion | `project-manager` |
 | `REPORT.md` | Report refinement cycles | `docs-expert` |
 
@@ -77,9 +74,6 @@ project-manager
   |-- TASK.md
   |-- STEP.md
   |-- .github/agent-state/**
-
-researcher
-  |-- CONTEXT.md
 
 planner
   |-- PLAN.md

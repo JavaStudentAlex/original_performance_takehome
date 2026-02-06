@@ -18,7 +18,6 @@ Higher-level workflows/orchestration prompts should **reference this file** so m
 
 | Agent ID | Default model | Agent file (repo path) |
 |---|---|---|
-| `researcher` | `gpt-5.2` | `.github/agents/researcher.agent.md` |
 | `planner` | `gpt-5.2` | `.github/agents/planner.agent.md` |
 | `plan-critic` | `claude-opus-4.5` | `.github/agents/plan-critic.agent.md` |
 | `ilp-schedule-expert` | `gpt-5.2-codex` | `.github/agents/ilp-schedule-expert.agent.md` |

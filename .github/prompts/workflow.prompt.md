@@ -73,7 +73,7 @@ After `WORKFLOW_PREFLIGHT: OK`:
 2. Use this file's Phase Execution Map (§4) as the concrete agent/artifact binding
 3. Follow the skill's gate and restart rules
 
-Do NOT skip to Phase C before A and B gates pass.
+Do NOT skip to Phase B before Phase A gate passes.
 
 ---
 
@@ -119,15 +119,7 @@ These always win if conflicts arise.
 
 This is the **first step** of every workflow.
 
-### Phase A -- Research
-
-| Field | Value |
-|-------|-------|
-| Agent | `researcher` |
-| Artifact | `CONTEXT.md` |
-| Skill | `context-md-formatting` |
-
-### Phase B -- Planning
+### Phase A -- Planning (Deep Research + Plan)
 
 | Field | Value |
 |-------|-------|
@@ -136,7 +128,7 @@ This is the **first step** of every workflow.
 | Artifact | `PLAN.md` |
 | Skill | `plan-md-formatting` |
 
-### Phase C -- Implementation
+### Phase B -- Implementation
 
 | Field | Value |
 |-------|-------|
@@ -154,7 +146,7 @@ Implementer/critic pairs per step type:
 | Control flow / predication / FLOW minimization | `control-flow-expert` | `control-flow-critic` |
 | Documentation / report | `docs-expert` | `docs-critic` |
 
-### Phase D -- Report
+### Phase C -- Report
 
 | Field | Value |
 |-------|-------|
@@ -171,7 +163,7 @@ Pass to every subagent. Schema fields:
 
 ```
 RUN_ID, PHASE, STEP_ID, CYCLE_NUM, AGENT_ROLE
-TASK_MD, CONTEXT_MD, PLAN_MD, STEP_MD
+TASK_MD, PLAN_MD, STEP_MD
 MICRO_TASK, DEFINITION_OF_DONE, PREV_CRITIQUE
 RELEVANT_CODE_CONTEXT, PROGRESS_SINCE_LAST_CYCLE
 ```
@@ -195,8 +187,8 @@ State lives under `.github/agent-state/**` (see `artifacts.prompt.md` for owners
 |--------------|------------|
 | Intent unclear | Phase 0 |
 | Evidence weak | Phase A |
-| Plan wrong | Phase B |
-| Implementation blocked | Phase C (same step) |
+| Plan wrong | Phase A |
+| Implementation blocked | Phase B (same step) |
 
 See `workflow-cycle-running` skill for restart procedures.
 

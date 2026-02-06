@@ -1,6 +1,6 @@
 ---
 name: workflow-cycle-running
-description: Orchestrates one full end-to-end development iteration (task framing, research, planning, implementation, verification) by composing existing skills. Defines phase gates, restart rules, and required artifacts.
+description: Orchestrates one full end-to-end development iteration (task framing, planner-led research+planning, implementation, verification) by composing existing skills. Defines phase gates, restart rules, and required artifacts.
 ---
 
 # Skill: workflow-cycle-running
@@ -16,10 +16,9 @@ This skill defines the **global development cycle** as a reusable, high-level co
 A global cycle is one complete end-to-end iteration through:
 
 1. **Task framing** - Convert raw request into structured intent
-2. **Research** - Gather evidence and context
-3. **Planning** - Decompose into implementable steps
-4. **Implementation** - Execute steps with refinement cycles
-5. **Verification** - Validate and report outcomes
+2. **Planning (with deep research)** - Gather evidence and produce executable plan
+3. **Implementation** - Execute steps with refinement cycles
+4. **Verification** - Validate and report outcomes
 
 **Key principle:** This skill is intentionally abstract. It defines phases, gates, artifacts, and restart semantics without prescribing specific agents, models, or orchestration tooling.
 
@@ -29,7 +28,7 @@ A global cycle is one complete end-to-end iteration through:
 
 **Always use** when:
 - Starting a new feature, fix, or investigation from a raw request
-- Orchestrating end-to-end work that requires research, planning, and implementation
+- Orchestrating end-to-end work that requires planning and implementation
 - Coordinating multiple agents through a structured workflow
 - Ensuring consistent artifact production and quality gates
 
@@ -47,11 +46,10 @@ A global cycle is one complete end-to-end iteration through:
 
 | Phase | Goal | Input | Output | Gate |
 |-------|------|-------|--------|------|
-| A | Task framing | Raw request | `TASK.md` | TECC sections complete, outcomes observable |
-| B | Research | `TASK.md` | `CONTEXT.md` | Facts vs hypotheses separated, unknowns documented |
-| C | Planning | `TASK.md` + `CONTEXT.md` | `PLAN.md` | Steps have IDs, scope, DoD; dependencies stated |
-| D | Implementation | `PLAN.md` | Code + `STEP.md` per step | Each step DoD satisfied with evidence |
-| E | Verification | All artifacts | `REPORT.md` | Quality gates pass, evidence recorded |
+| 0 | Task framing | Raw request | `TASK.md` | TECC sections complete, outcomes observable |
+| A | Planning (deep research + plan) | `TASK.md` | `PLAN.md` | Research evidence captured; steps have IDs, scope, DoD |
+| B | Implementation | `PLAN.md` | Code + `STEP.md` per step | Each step DoD satisfied with evidence |
+| C | Verification | All artifacts | `REPORT.md` | Quality gates pass, evidence recorded |
 
 ### Cycle Outcomes
 
@@ -65,10 +63,10 @@ A global cycle is one complete end-to-end iteration through:
 
 | Failure Type | Restart From |
 |--------------|--------------|
-| Unclear/unstable requirements | Phase A (Task) |
-| Insufficient evidence / wrong assumptions | Phase B (Context) |
-| Plan not implementable | Phase C (Plan) |
-| Implementation blockers with adequate plan | Phase D (Implementation) |
+| Unclear/unstable requirements | Phase 0 (Task) |
+| Insufficient evidence / wrong assumptions | Phase A (Plan research) |
+| Plan not implementable | Phase A (Plan research) |
+| Implementation blockers with adequate plan | Phase B (Implementation) |
 
 ---
 
@@ -79,8 +77,7 @@ This skill composes these skills as building blocks:
 | Dependency | Path | Purpose |
 |------------|------|---------|
 | TECC task framing | `.github/skills/task-md-tecc-formatting/SKILL.md` | Canonical `TASK.md` format |
-| Context documentation | `.github/skills/context-md-formatting/SKILL.md` | Canonical `CONTEXT.md` format |
-| Plan definition | `.github/skills/plan-md-formatting/SKILL.md` | Canonical `PLAN.md` format |
+| Plan definition | `.github/skills/plan-md-formatting/SKILL.md` | Canonical self-contained `PLAN.md` format |
 | Step tracking | `.github/skills/step-md-formatting/SKILL.md` | Canonical `STEP.md` format |
 | Implementation refinement | `.github/skills/impl-refine-cycle-running/SKILL.md` | One implementer+critic pass |
 | Reporting | `.github/skills/report-md-formatting/SKILL.md` | Canonical `REPORT.md` format |
@@ -104,11 +101,10 @@ A global cycle produces and maintains these canonical artifacts:
 
 | Artifact | Owner Phase | Purpose |
 |----------|-------------|---------|
-| `TASK.md` | Phase A | Single source of truth for intent |
-| `CONTEXT.md` | Phase B | Evidence and findings |
-| `PLAN.md` | Phase C | Implementation roadmap |
-| `STEP.md` | Phase D | Per-step execution state |
-| `REPORT.md` | Phase E | Verification evidence and outcomes |
+| `TASK.md` | Phase 0 | Single source of truth for intent |
+| `PLAN.md` | Phase A | Deep-research-backed implementation roadmap |
+| `STEP.md` | Phase B | Per-step execution state |
+| `REPORT.md` | Phase C | Verification evidence and outcomes |
 
 ### Optional State Artifacts
 
@@ -144,7 +140,7 @@ The caller must supply or derive a run configuration.
 | `QUALITY_GATES` | pointer | Commands/criteria that must pass |
 
 **RESTART_POLICY structure:**
-- `restart_from`: one of `TASK`, `CONTEXT`, `PLAN`, `IMPLEMENTATION`
+- `restart_from`: one of `TASK`, `PLAN`, `IMPLEMENTATION`
 - `restart_on`: list of conditions
 
 **STEP_EXECUTION_POLICY structure:**
@@ -155,7 +151,7 @@ The caller must supply or derive a run configuration.
 
 ## Procedure
 
-### Phase 0: Pre-flight (Hard Gate)
+### Phase -1: Pre-flight (Hard Gate)
 
 **Goal:** Ensure a safe starting point for an end-to-end iteration.
 
@@ -170,7 +166,7 @@ The caller must supply or derive a run configuration.
 
 ---
 
-### Phase A: Task Framing (Hard Gate)
+### Phase 0: Task Framing (Hard Gate)
 
 **Goal:** Convert raw request into canonical, unambiguous intent.
 
@@ -184,31 +180,13 @@ The caller must supply or derive a run configuration.
 - Constraints include explicit non-goals
 - Unknowns marked as `(missing)` or `(to be confirmed)`
 
-**If Phase A fails:** Outcome is `BLOCKED` (task cannot be stated clearly enough to proceed).
+**If Phase 0 fails:** Outcome is `BLOCKED` (task cannot be stated clearly enough to proceed).
 
 ---
 
-### Phase B: Research / Context Gathering (Hard Gate)
+### Phase A: Planning (Deep Research + Plan) (Hard Gate)
 
-**Goal:** Gather evidence so planning and implementation can proceed confidently.
-
-**Procedure:**
-1. Produce or refine `CONTEXT.md` using `.github/skills/context-md-formatting/SKILL.md`
-2. Validate context pass criteria
-
-**Gate:** `CONTEXT.md` satisfies:
-- Facts vs hypotheses clearly separated
-- Current vs expected behavior explicit
-- Affected code areas listed (or explicitly `(missing)`)
-- Unknowns documented, not hidden
-
-**If Phase B fails:** Outcome is `BLOCKED` (insufficient information to plan safely).
-
----
-
-### Phase C: Plan Refinement (Hard Gate)
-
-**Goal:** Convert intent + context into an implementable plan.
+**Goal:** Gather evidence and convert intent into an implementable plan.
 
 **Procedure:**
 1. Produce or refine `PLAN.md` using `.github/skills/plan-md-formatting/SKILL.md`
@@ -216,19 +194,20 @@ The caller must supply or derive a run configuration.
 3. Validate plan pass criteria
 
 **Gate:** `PLAN.md` is implementation-ready:
+- Includes research evidence with inspected scope, factual observations, unknowns, and constraints
 - Steps uniquely identified (P01, P02, ...)
 - Each step has Implementer, Critic, Scope, DoD
 - Scope contains concrete paths/symbols
 - DoD contains observable, testable criteria
 - Dependencies and risks described (or marked `(missing)`)
 
-**If Phase C fails:**
-- Missing/weak context: `RESTART_REQUIRED` from Phase B
-- Unclear intent: `RESTART_REQUIRED` from Phase A
+**If Phase A fails:**
+- Missing/weak evidence: `RESTART_REQUIRED` from Phase A
+- Unclear intent: `RESTART_REQUIRED` from Phase 0
 
 ---
 
-### Phase D: Implementation (Step-wise)
+### Phase B: Implementation (Step-wise)
 
 **Goal:** Execute each plan step with iterative implementer+critic refinement.
 
@@ -268,15 +247,15 @@ The caller must supply or derive a run configuration.
 
 | Cause | Restart From |
 |-------|--------------|
-| Plan flaw (bad decomposition, missing DoD) | Phase C |
-| Missing facts / wrong assumptions | Phase B |
-| Unclear intent / shifting requirements | Phase A |
+| Plan flaw (bad decomposition, missing DoD) | Phase A |
+| Missing facts / wrong assumptions | Phase A |
+| Unclear intent / shifting requirements | Phase 0 |
 
 Preserve evidence (cycle outputs, step notes) for next run, but treat as non-authoritative until revalidated.
 
 ---
 
-### Phase E: Verification and Report (Hard Gate)
+### Phase C: Verification and Report (Hard Gate)
 
 **Goal:** Consolidate results and provide auditable evidence of correctness.
 
@@ -286,11 +265,11 @@ Preserve evidence (cycle outputs, step notes) for next run, but treat as non-aut
    - What changed (high-level)
    - What was verified (commands/tests) with results
    - Known limitations / risks
-   - Pointers to key artifacts (`TASK.md`, `CONTEXT.md`, `PLAN.md`, `STEP.md` files)
+   - Pointers to key artifacts (`TASK.md`, `PLAN.md`, `STEP.md` files)
 
 **Gate:** All quality gates stated in `TASK.md` Constraints are satisfied (or exceptions documented with rationale).
 
-**If Phase E fails:** `RESTART_REQUIRED` from Phase D (unless failure reveals plan/context issues).
+**If Phase C fails:** `RESTART_REQUIRED` from Phase B (unless failure reveals plan issues).
 
 ---
 
@@ -302,10 +281,10 @@ A restart is a **new global cycle run** with a new `RUN_ID`, retaining prior art
 
 | Failure Condition | Restart Phase | Rationale |
 |-------------------|---------------|-----------|
-| Requirements unclear or unstable | A (Task) | Intent must be re-clarified |
-| Evidence insufficient or wrong | B (Context) | Need more investigation |
-| Plan not implementable | C (Plan) | Decomposition needs revision |
-| Implementation blocked, plan OK | D (Implementation) | Retry with same plan |
+| Requirements unclear or unstable | 0 (Task) | Intent must be re-clarified |
+| Evidence insufficient or wrong | A (Plan research) | Need more investigation/planning evidence |
+| Plan not implementable | A (Plan research) | Decomposition needs revision |
+| Implementation blocked, plan OK | B (Implementation) | Retry with same plan |
 
 ### Restart Procedure
 
@@ -343,11 +322,10 @@ A restart is a **new global cycle run** with a new `RUN_ID`, retaining prior art
 
 Before treating a global cycle as complete, verify:
 
-- [ ] Phase A gate passed: `TASK.md` has all TECC sections, observable outcomes
-- [ ] Phase B gate passed: `CONTEXT.md` separates facts/hypotheses, documents unknowns
-- [ ] Phase C gate passed: `PLAN.md` has identified steps with scope and DoD
-- [ ] Phase D gate passed: All steps have Status = `DONE`, evidence recorded
-- [ ] Phase E gate passed: `REPORT.md` documents verification with commands and results
+- [ ] Phase 0 gate passed: `TASK.md` has all TECC sections, observable outcomes
+- [ ] Phase A gate passed: `PLAN.md` includes research evidence plus executable steps with scope and DoD
+- [ ] Phase B gate passed: All steps have Status = `DONE`, evidence recorded
+- [ ] Phase C gate passed: `REPORT.md` documents verification with commands and results
 - [ ] All quality gates from `TASK.md` Constraints are satisfied
 - [ ] No artifacts contain `(missing)` without documented mitigation
 - [ ] Run journal/logs capture phase transitions and outcomes
@@ -358,7 +336,7 @@ Before treating a global cycle as complete, verify:
 
 | Pitfall | Problem | Fix |
 |---------|---------|-----|
-| Skipping Phase B | Plan based on assumptions, not evidence | Always gather context before planning |
+| Skipping deep research in planning | Plan based on assumptions, not evidence | Require research evidence in `PLAN.md` before steps |
 | Vague DoD in plan | Cannot verify step completion | Ensure DoD is observable and testable |
 | Ignoring SOFT_FAIL nits | Tech debt accumulates | Track nits for follow-up or fix before proceeding |
 | Restarting without new RUN_ID | Confusion about which run's artifacts are current | Always create new RUN_ID on restart |
@@ -388,7 +366,7 @@ PHASE_LIMITS:
   MAX_PLAN_REFINEMENTS: 3
   MAX_CYCLES_PER_STEP: 5
 RESTART_POLICY:
-  restart_from: CONTEXT
+  restart_from: PLAN
   restart_on:
     - insufficient_evidence
     - wrong_assumptions
@@ -405,13 +383,12 @@ QUALITY_GATES:
 ```markdown
 ## 2025-01-21T14:30:00Z - Phase Transition
 
-- From: Phase B (Research)
-- To: Phase C (Planning)
+- From: Phase 0 (Task)
+- To: Phase A (Planning)
 - Gate Status: PASSED
 - Artifacts:
   - TASK.md: validated
-  - CONTEXT.md: validated (3 hypotheses, 2 unknowns documented)
-- Next Action: Produce PLAN.md
+- Next Action: Produce PLAN.md with research evidence
 ```
 
 ### Restart Decision Log Entry
@@ -419,14 +396,14 @@ QUALITY_GATES:
 ```markdown
 ## 2025-01-21T16:45:00Z - Restart Decision
 
-- Current Phase: D (Implementation)
+- Current Phase: B (Implementation)
 - Step: P02
 - Verdict: HARD_FAIL
 - Cause: Plan step P02 depends on API that doesn't exist (wrong assumption)
 - Classification: Missing facts / wrong assumptions
-- Decision: RESTART_REQUIRED from Phase B
+- Decision: RESTART_REQUIRED from Phase A
 - New RUN_ID: run-2025-01-21-003
-- Preserving: TASK.md (valid), CONTEXT.md (to be updated), cycle-01-*.md logs
+- Preserving: TASK.md (valid), PLAN.md (to be updated), cycle-01-*.md logs
 ```
 
 ---
@@ -435,12 +412,12 @@ QUALITY_GATES:
 
 **Key Takeaways:**
 
-1. **Global cycle has five phases** - Task, Research, Plan, Implement, Verify - each with a hard gate
+1. **Global cycle has four hard-gate phases** - Phase 0 Task, Phase A Plan (with research), Phase B Implement, Phase C Verify
 2. **Phases are sequential** - Do not skip phases; each gate must pass before proceeding
 3. **Compose, don't duplicate** - Reference other skills for artifact formatting and refinement mechanics
 4. **Restart boundaries are defined** - Failures map to specific restart phases based on cause
 5. **Evidence is mandatory** - Every verification claim needs recorded commands and outputs
-6. **Unknowns are explicit** - Mark `(missing)` rather than guess; document in Unknowns section
+6. **Unknowns are explicit** - Mark `(missing)` rather than guess; document in plan/report
 
 **The Golden Rule:** A global cycle succeeds when all phase gates pass and `REPORT.md` contains verifiable evidence that `TASK.md` intent was satisfied.
 
@@ -449,8 +426,7 @@ QUALITY_GATES:
 ## References
 
 - `.github/skills/task-md-tecc-formatting/SKILL.md` - Task framing
-- `.github/skills/context-md-formatting/SKILL.md` - Context gathering
-- `.github/skills/plan-md-formatting/SKILL.md` - Planning
+- `.github/skills/plan-md-formatting/SKILL.md` - Planning with embedded research evidence
 - `.github/skills/step-md-formatting/SKILL.md` - Step tracking
 - `.github/skills/impl-refine-cycle-running/SKILL.md` - Implementation refinement
 - `.github/skills/report-md-formatting/SKILL.md` - Reporting

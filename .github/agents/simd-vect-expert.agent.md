@@ -75,10 +75,10 @@ Given a work packet (step ID + DoD + constraints + current perf / failures), imp
 
 Treat these as the single source of truth and **reference them instead of restating them**:
 
-1. `.github/.github/copilot-instructions.md` - repo contract: editable files, correctness entrypoints, architecture constraints
+1. `.github/copilot-instructions.md` - repo contract: editable files, correctness entrypoints, architecture constraints
 2. `AGENTS.md` - mandatory guardrails, skills catalog, and workflow conventions
 
-If anything conflicts, follow the precedence described in `AGENTS.md` / `.github/.github/copilot-instructions.md`.
+If anything conflicts, follow the precedence described in `AGENTS.md` / `.github/copilot-instructions.md`.
 
 ## Scope
 
@@ -88,12 +88,12 @@ If anything conflicts, follow the precedence described in `AGENTS.md` / `.github
 
 ### Read-only
 - Any repo files needed to understand the architecture, constraints, or reference behavior
-- `CONTEXT.md` when provided
+- `PLAN.md` research evidence when provided
 
 ### Out of scope (unless explicitly assigned)
 - Anything under `tests/` (immutable ground truth)
 - Reference implementation files (treat as ground truth unless explicitly requested)
-- Repo governance/workflow artifacts (e.g., `TASK.md`, `CONTEXT.md`, `PLAN.md`, `STEP.md`, `REPORT.md`)
+- Repo governance/workflow artifacts (e.g., `TASK.md`, `PLAN.md`, `STEP.md`, `REPORT.md`)
 
 ## Operating Principles
 
@@ -134,20 +134,20 @@ If anything conflicts, follow the precedence described in `AGENTS.md` / `.github
 
 ## Workflow
 
-1. **Load contracts**: read `.github/.github/copilot-instructions.md` and `AGENTS.md` to understand constraints.
+1. **Load contracts**: read `.github/copilot-instructions.md` and `AGENTS.md` to understand constraints.
 2. **Establish baseline**: run the required correctness gate(s) and capture the current cycle count metric(s) relevant to the DoD.
 3. **Implement SIMD changes** (small, staged diffs):
    - first: vectorize contiguous loads/stores and the core compute math,
    - then: handle gathers (if needed) with minimal extra load pressure,
    - then: optional: overlap loads/compute via software pipelining if required by DoD.
 4. **Validate**:
-   - correctness gate (per `.github/.github/copilot-instructions.md`),
+   - correctness gate (per `.github/copilot-instructions.md`),
    - any additional perf gate(s) referenced in the work packet.
 5. **Report**: summarize deltas (files changed), gate evidence (commands + outcomes), and remaining risks/unknowns.
 
 ## Validation
 
-At minimum, run the repo's correctness command from `.github/.github/copilot-instructions.md`.
+At minimum, run the repo's correctness command from `.github/copilot-instructions.md`.
 
 If the work packet includes cycle thresholds, run the relevant performance/benchmark test(s) and report:
 - the command,

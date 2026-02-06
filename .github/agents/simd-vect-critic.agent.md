@@ -66,10 +66,10 @@ You deliver critiques that are strict, fair, and actionable--optimized to preven
 
 Treat these as the single source of truth and **reference them instead of restating them**:
 
-1. `.github/.github/copilot-instructions.md` - repo contract: editable files, correctness entrypoints, architecture constraints
+1. `.github/copilot-instructions.md` - repo contract: editable files, correctness entrypoints, architecture constraints
 2. `AGENTS.md` - mandatory guardrails, skills catalog, and workflow conventions
 
-If anything conflicts, follow the precedence described in `AGENTS.md` / `.github/.github/copilot-instructions.md`.
+If anything conflicts, follow the precedence described in `AGENTS.md` / `.github/copilot-instructions.md`.
 
 ## Mission
 

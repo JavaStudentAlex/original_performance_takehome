@@ -11,7 +11,7 @@
 # Examples:
 #   ./run-subagent.sh --agent=compilers-expert --prompt "Optimize the VLIW bundler"
 #   ./run-subagent.sh --agent=test-expert --workdir ./tests --prompt "Write unit tests"
-#   ./run-subagent.sh --agent=researcher --context-file STEP.md --prompt "Follow STEP.md"
+#   ./run-subagent.sh --agent=planner --context-file STEP.md --prompt "Follow STEP.md"
 #
 # Note:
 #   This wrapper always writes a patch capturing the workspace changes made
@@ -76,7 +76,7 @@ Output:
 Examples:
     $(basename "$0") --agent=ml-expert --prompt "Implement the loss function"
     $(basename "$0") --agent=test-expert --model gpt-5 --prompt "Write unit tests"
-    $(basename "$0") --agent=researcher --workdir ./src --prompt "Analyze this module"
+    $(basename "$0") --agent=planner --workdir ./src --prompt "Analyze this module"
     $(basename "$0") --prompt "Refactor this" --context-file STEP.md
 
 Tool Permission Examples:

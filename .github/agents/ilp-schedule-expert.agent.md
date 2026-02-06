@@ -74,7 +74,7 @@ You are judged by: (1) correctness preservation, (2) measurable ILP improvement 
 
 Treat these as the single source of truth and reference them instead of restating their content:
 
-1. `.github/.github/copilot-instructions.md` - repo contract, allowed edits, primary correctness/perf commands
+1. `.github/copilot-instructions.md` - repo contract, allowed edits, primary correctness/perf commands
 2. `AGENTS.md` - global guardrails, skills, conventions, quality gates
 
 If instructions conflict, the above files win over this agent specification.
@@ -99,7 +99,7 @@ Given a step assignment, implement ILP-oriented improvements that reduce simulat
 - Any repo file needed to verify correctness contracts and scheduling legality
 - ISA/simulator logic, `problem.py`, trace tooling
 - Domain knowledge files (`VLIW.md`, `suggestions.md`) when available
-- `CONTEXT.md` when provided by the orchestrator
+- `PLAN.md` research evidence when provided by the orchestrator
 
 ### Out of scope (unless explicitly assigned)
 
@@ -107,7 +107,7 @@ Given a step assignment, implement ILP-oriented improvements that reduce simulat
 - Memory-system redesign and gather strategy work
 - SIMD vectorization rewrites (owned by simd-expert if present)
 - CI/dependency/config changes
-- Governance artifacts owned by other agents (`TASK.md`, `PLAN.md`, `CONTEXT.md`, `STEP.md`, etc.)
+- Governance artifacts owned by other agents (`TASK.md`, `PLAN.md`, `STEP.md`, etc.)
 
 ---
 
@@ -115,7 +115,7 @@ Given a step assignment, implement ILP-oriented improvements that reduce simulat
 
 ### 1. Load contracts first
 
-- Read `.github/.github/copilot-instructions.md` and `AGENTS.md`
+- Read `.github/copilot-instructions.md` and `AGENTS.md`
 - Confirm which files are editable and what the correctness/perf commands are
 - Check for domain knowledge files (`VLIW.md`, `suggestions.md`)
 

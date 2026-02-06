@@ -59,17 +59,10 @@ Skills are reusable instruction sets that agents follow for specific tasks.
 - **Sections**: Task, Expected Outcome, Constraints, Context
 - **Pass criteria**: All four TECC sections present, outcomes observable, non-goals explicit
 
-#### context-md-formatting
-- **Path**: `.github/skills/context-md-formatting/SKILL.md`
-- **Purpose**: Gather and document investigation findings in structured `CONTEXT.md`
-- **Use when**: Investigating bugs/issues, exploring unfamiliar code, preparing context for planning or implementation
-- **Output**: `CONTEXT.md` with problem analysis, affected code areas, ranked hypotheses, and explicit unknowns
-- **Pass criteria**: All required sections present, facts separated from hypotheses, current vs expected unambiguous, unknowns documented (not invented)
-
 #### plan-md-formatting
 - **Path**: `.github/skills/plan-md-formatting/SKILL.md`
-- **Purpose**: Convert `TASK.md` + `CONTEXT.md` into a canonical, implementation-ready `PLAN.md` with explicit step ownership and verifiable DoD
-- **Use when**: Planning execution after task refinement and context gathering; splitting work into steps across implementer/critic agents
+- **Purpose**: Convert `TASK.md` + planner-led research findings into a canonical, implementation-ready `PLAN.md` with explicit step ownership and verifiable DoD
+- **Use when**: Planning execution after task refinement; splitting work into steps across implementer/critic agents
 - **Output**: `PLAN.md` with Summary + sequential steps (`P01`, `P02`, ...) using the required step fields
 - **Pass criteria**: `PLAN.md` follows canonical structure; every step includes Implementer/Critic + model fields, concrete Scope (paths/symbols), and observable DoD; unknowns marked `(missing)` / `(to be confirmed)`
 
@@ -90,17 +83,17 @@ Skills are reusable instruction sets that agents follow for specific tasks.
 #### impl-refine-cycle-running
 - **Path**: `.github/skills/impl-refine-cycle-running/SKILL.md`
 - **Purpose**: Run exactly one implementer+critic refinement cycle, persist cycle artifacts, and select/apply patch based on verdict
-- **Use when**: Executing Phase C refinement cycles for a step; you need deterministic per-cycle outputs and patch handling
+- **Use when**: Executing Phase B refinement cycles for a step; you need deterministic per-cycle outputs and patch handling
 - **Output**: `cycle-<NN>-service.md`, `cycle-<NN>-critic.md` written under `STATE_BASE_DIR` (default: `.github/agent-state/cycles/<STEP_ID>/`)
 - **Pass criteria**: Artifacts are written; verdict recorded; patch is applied only on `PASS`/`SOFT_FAIL` and never on `HARD_FAIL`; skill stops after one cycle (looping is caller responsibility)
 - **Guardrail notes**: Must not apply patches that touch `tests/`, change test interfaces, or modify constants.
 
 #### workflow-cycle-running
 - **Path**: `.github/skills/workflow-cycle-running/SKILL.md`
-- **Purpose**: Orchestrate a complete development cycle (task framing, research, planning, implementation, verification) with phase gates, restart semantics, and evidence-backed completion
+- **Purpose**: Orchestrate a complete development cycle (task framing, planning with deep research, implementation, verification) with phase gates, restart semantics, and evidence-backed completion
 - **Use when**: Starting a new feature/fix/investigation from raw request; coordinating end-to-end work through structured phases; ensuring consistent artifact production and quality gates
-- **Output**: `TASK.md`, `CONTEXT.md`, `PLAN.md`, `STEP.md` per step, `REPORT.md`; optional run journal at `.github/agent-state/runs/<RUN_ID>/`
-- **Pass criteria**: All five phase gates pass; all steps have Status = `DONE` with evidence; `REPORT.md` includes verification commands and results; quality gates from `TASK.md` Constraints satisfied
+- **Output**: `TASK.md`, `PLAN.md`, `STEP.md` per step, `REPORT.md`; optional run journal at `.github/agent-state/runs/<RUN_ID>/`
+- **Pass criteria**: All hard-gate phases pass; all steps have Status = `DONE` with evidence; `REPORT.md` includes verification commands and results; quality gates from `TASK.md` Constraints satisfied
 
 ### Quality Gate Skills
 
@@ -200,8 +193,7 @@ Use the repo's contract in `.github/copilot-instructions.md` as the source of tr
 Format: `agent/<agent-name>/<phase-or-step-id>-cycle-<N>`
 
 **Examples:**
-- Research: `agent/researcher/RESEARCH-cycle-1`
-- Planning: `agent/planner/PLAN-cycle-1`
+- Planning + research: `agent/planner/PLAN-cycle-1`
 - Plan review: `agent/plan-critic/PLAN-cycle-1`
 - Implementation: `agent/ml-expert/P01-cycle-1`
 - Code review: `agent/ml-critic/P01-cycle-1`
