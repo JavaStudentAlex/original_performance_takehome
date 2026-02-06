@@ -209,11 +209,32 @@ class KernelBuilder:
             for p in pred[i]:
                 succ[p].add(i)
         
-        # Compute height (longest path to any leaf) for critical path priority
+        # Latency weights for critical path computation
+        # LOADs/STOREs are the bottleneck (2 slots/cycle), so weight them higher
+        # FLOW ops (branches) also critical for control flow
+        # ALU/VALU abundant, so lower weight
+        def get_latency_weight(engine):
+            if engine == "load":
+                return 3  # Highest: memory bottleneck
+            elif engine == "store":
+                return 3  # High: limited slots
+            elif engine == "flow":
+                return 2  # Medium: control critical
+            elif engine == "valu":
+                return 1  # Low: abundant
+            elif engine == "alu":
+                return 1  # Low: abundant
+            else:
+                return 0
+        
+        # Compute height (longest latency-weighted path to any leaf) for critical path priority
         height = [0] * n
         for i in range(n - 1, -1, -1):
+            weight = get_latency_weight(slots[i][0])
             if succ[i]:
-                height[i] = 1 + max(height[s] for s in succ[i])
+                height[i] = weight + max(height[s] for s in succ[i])
+            else:
+                height[i] = weight
         
         # Ready queue: ops with all dependencies satisfied
         ready = [i for i in range(n) if dep_count[i] == 0]
