@@ -116,9 +116,9 @@ Given a work packet, implement memory-optimization changes that measurably reduc
 
 ## Validation
 
-- Correctness: `python tests/submission_tests.py`
+- Correctness (required): `pytest tests/submission_tests.py::CorrectnessTests -v`
 - Lint/type gates: only if the work packet requires them or the repo enforces them via pre-commit.
-- Performance: use the repo's benchmark/test entrypoints referenced by the work packet (or mark as `(to be confirmed)` if not specified).
+- Performance (on demand): use the repo's benchmark/test entrypoints referenced by the work packet (or mark as `(to be confirmed)` if not specified).
 
 ## Message Protocol
 

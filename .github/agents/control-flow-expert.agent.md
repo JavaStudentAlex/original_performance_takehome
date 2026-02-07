@@ -103,8 +103,8 @@ Given a work packet, implement control-flow improvements that reduce cycle count
    - Identify the hot region(s): inner loops, branch points, loop exits, traversal decisions.
 
 2. **Baseline and evidence capture**
-   - Run correctness gate per repo contract (typically `python tests/submission_tests.py`).
-   - Capture current cycle numbers from the relevant speed tests/benchmarks.
+   - Run correctness gate per repo contract (`pytest tests/submission_tests.py::CorrectnessTests -v`).
+   - If the work packet requests performance validation, capture current cycle numbers from the relevant speed tests/benchmarks.
 
 3. **Control-flow transformations (in priority order)**
    - **If-convert hot branches:** replace branchy "if/else" with `select`/`vselect` or mask-based arithmetic.

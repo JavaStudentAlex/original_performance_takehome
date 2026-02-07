@@ -124,20 +124,24 @@ Use the repo's contract in `.github/copilot-instructions.md` as the source of tr
 ### Core correctness gate (required)
 
 - Run the repository's authoritative correctness check(s) as specified by the repo.
-- In this repo, correctness is validated against the existing tests (read-only). A common entrypoint is `python tests/submission_tests.py` (if present), but always defer to `.github/copilot-instructions.md` for the exact command.
+- In this repo, the required correctness gate is `pytest tests/submission_tests.py::CorrectnessTests -v` (tests remain read-only ground truth).
 
 ### Testing requirements for this repository
 
-**Running tests is mandatory** after any code change.
+**Running `CorrectnessTests` is mandatory** after any code change.
 
 | Test Suite | Must Pass? | Purpose |
 |------------|------------|---------|
 | `CorrectnessTests` | **Yes** | Validates functional correctness against the reference kernel |
-| `SpeedTests` | No | Compares cycle counts to existing benchmarks |
+| `SpeedTests` | On demand | Compares cycle counts to existing benchmarks |
 
 **Commands:**
-- Correctness: `pytest tests/submission_tests.py::CorrectnessTests -v`
-- Performance: `pytest tests/submission_tests.py::SpeedTests -v`
+- Required correctness: `pytest tests/submission_tests.py::CorrectnessTests -v`
+- On-demand performance: `pytest tests/submission_tests.py::SpeedTests -v`
+
+**When to run `SpeedTests` (on demand):**
+- The user or work packet explicitly requests performance benchmarking.
+- The step DoD includes a cycle target or speedup requirement.
 
 **SpeedTests interpretation:**
 - SpeedTests compare your implementation's cycle counts against established benchmark targets.

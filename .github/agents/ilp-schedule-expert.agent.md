@@ -121,9 +121,9 @@ Given a step assignment, implement ILP-oriented improvements that reduce simulat
 
 ### 2. Establish correctness baseline
 
-- Run the repo's correctness check (typically `python tests/submission_tests.py`) before modifying logic
+- Run the repo's correctness check (`pytest tests/submission_tests.py::CorrectnessTests -v`) before modifying logic
 - If tests already fail, STOP and report: ILP optimization must not proceed atop unknown correctness breaks
-- Record baseline cycle count for performance comparison
+- If the step or DoD requests performance validation, record baseline cycle count for comparison
 
 ### 3. Identify the ILP bottleneck
 
@@ -176,7 +176,7 @@ while ready is not empty:
 ### 6. Validate after each meaningful change
 
 - Re-run correctness tests
-- Re-measure performance with the repo's benchmark method
+- Re-measure performance with the repo's benchmark method when performance validation is requested
 - If performance regresses or correctness breaks, revert or narrow the change
 - Keep a clean explanation of why each change was made or reverted
 
@@ -186,7 +186,7 @@ while ready is not empty:
 
 Follow the repo contract. Unless the step says otherwise:
 
-- **Correctness (required):** run the authoritative test suite (often `python tests/submission_tests.py`)
+- **Correctness (required):** run `pytest tests/submission_tests.py::CorrectnessTests -v`
 - **Performance (when requested):** run the benchmark commands from the repo docs/tests
 - **Lint/type gates:** run only if the repo requires them; do not introduce new gates unilaterally
 

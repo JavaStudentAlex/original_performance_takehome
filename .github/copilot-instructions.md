@@ -144,6 +144,12 @@ For detailed optimization tactics (software pipelining, unroll-and-jam, if-conve
 - Treat the memory header layout (rounds, n_nodes, batch_size, pointers, etc.) as authoritative.
 - All arithmetic is **mod 2^32** (per ISA rules).
 
+## Verification policy
+
+- After any code change, run: `pytest tests/submission_tests.py::CorrectnessTests -v`
+- Run `SpeedTests` only on demand (for explicit performance requests / cycle-target DoD):
+  `pytest tests/submission_tests.py::SpeedTests -v`
+
 ---
 
 ## Development workflow
