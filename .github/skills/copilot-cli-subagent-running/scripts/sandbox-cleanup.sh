@@ -70,6 +70,16 @@ fi
 SANDBOX_DIR_REAL="$(realpath "$SANDBOX_DIR")"
 SANDBOX_BASE_REAL="$(realpath "$SANDBOX_BASE" 2>/dev/null || echo "$SANDBOX_BASE")"
 
+# Refuse cleanup if the resolved path is outside sandbox base.
+case "$SANDBOX_DIR_REAL/" in
+    "$SANDBOX_BASE_REAL/"*)
+        ;;
+    *)
+        log_error "Refusing cleanup outside sandbox base: $SANDBOX_DIR (resolved: $SANDBOX_DIR_REAL)"
+        exit 1
+        ;;
+esac
+
 # Get the branch name before removing worktree
 BRANCH_NAME=""
 if [[ -d "$SANDBOX_DIR_REAL/.git" ]] || [[ -f "$SANDBOX_DIR_REAL/.git" ]]; then
@@ -85,21 +95,13 @@ if git worktree remove "$SANDBOX_DIR_REAL" --force >/dev/null 2>&1; then
     cleanup_ok="true"
 else
     log_error "Failed to remove worktree, trying manual cleanup"
-    case "$SANDBOX_DIR_REAL/" in
-        "$SANDBOX_BASE_REAL/"*)
-            if rm -rf "$SANDBOX_DIR_REAL"; then
-                log_info "Manual cleanup removed directory"
-                cleanup_ok="true"
-            else
-                log_error "Manual cleanup failed: $SANDBOX_DIR_REAL"
-                exit 1
-            fi
-            ;;
-        *)
-            log_error "Refusing manual cleanup outside sandbox base: $SANDBOX_DIR (resolved: $SANDBOX_DIR_REAL)"
-            exit 1
-            ;;
-    esac
+    if rm -rf "$SANDBOX_DIR_REAL"; then
+        log_info "Manual cleanup removed directory"
+        cleanup_ok="true"
+    else
+        log_error "Manual cleanup failed: $SANDBOX_DIR_REAL"
+        exit 1
+    fi
 fi
 
 # Delete the branch if we got it

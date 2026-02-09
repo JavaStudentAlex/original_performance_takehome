@@ -166,33 +166,50 @@ USE_SANDBOX="false"
 SANDBOX_CLEANUP_ON_SUCCESS="true"
 SANDBOX_CLEANUP_ON_FAILURE="false"
 
+require_value() {
+    local opt="$1"
+    local remaining="$2"
+    if [[ "$remaining" -lt 2 ]]; then
+        log_error "Missing value for $opt"
+        print_usage
+        exit 1
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --prompt)
+            require_value "--prompt" "$#"
             PROMPT="$2"; shift 2 ;;
         --prompt=*)
             PROMPT="${1#*=}"; shift ;;
         --agent)
+            require_value "--agent" "$#"
             AGENT="$2"; shift 2 ;;
         --agent=*)
             AGENT="${1#*=}"; shift ;;
         --model)
+            require_value "--model" "$#"
             MODEL="$2"; shift 2 ;;
         --model=*)
             MODEL="${1#*=}"; shift ;;
         --workdir)
+            require_value "--workdir" "$#"
             WORKDIR="$2"; shift 2 ;;
         --workdir=*)
             WORKDIR="${1#*=}"; shift ;;
         --context-file)
+            require_value "--context-file" "$#"
             CONTEXT_FILE="$2"; shift 2 ;;
         --context-file=*)
             CONTEXT_FILE="${1#*=}"; shift ;;
         --allow-tool)
+            require_value "--allow-tool" "$#"
             EXTRA_ALLOW_TOOLS+=("$2"); shift 2 ;;
         --allow-tool=*)
             EXTRA_ALLOW_TOOLS+=("${1#*=}"); shift ;;
         --deny-tool)
+            require_value "--deny-tool" "$#"
             EXTRA_DENY_TOOLS+=("$2"); shift 2 ;;
         --deny-tool=*)
             EXTRA_DENY_TOOLS+=("${1#*=}"); shift ;;
@@ -205,6 +222,7 @@ while [[ $# -gt 0 ]]; do
         --verbose)
             VERBOSE="true"; shift ;;
         --patch-out)
+            require_value "--patch-out" "$#"
             PATCH_OUT="$2"; shift 2 ;;
         --patch-out=*)
             PATCH_OUT="${1#*=}"; shift ;;
@@ -404,6 +422,16 @@ if ! [[ "$ROW_ID" =~ ^[0-9]+$ ]]; then
 fi
 log_verbose "Agent run recorded in agents.db (id=$ROW_ID)"
 
+fail_after_run_registered() {
+    local msg="$1"
+    log_error "$msg"
+    db_exec "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=?1;" "$ROW_ID" || true
+    if [[ "$USE_SANDBOX" == "true" ]] && [[ -n "${SANDBOX_DIR:-}" ]] && [[ "$SANDBOX_CLEANUP_ON_FAILURE" == "true" ]]; then
+        "$SCRIPTS_DIR/sandbox-cleanup.sh" "$SANDBOX_DIR" || log_warn "Sandbox cleanup failed"
+    fi
+    exit 1
+}
+
 exit_code=0
 base_commit="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
 
@@ -417,25 +445,24 @@ fi
 # Note: creates git tree objects that become dangling after the diff.
 # These are cleaned up by periodic `git gc` (automatic on most systems).
 STATE_OUT="$PROJECT_ROOT/.github/agent-state/subagents/${TS}-${AGENT_FOR_NAMES}.workspace-state.txt"
-mkdir -p "$(dirname "$STATE_OUT")"
-before_tree="$(snapshot_directory_state "$SNAPSHOT_ROOT")" || {
-    log_error "Failed to snapshot directory state before run"
-    db_exec "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=?1;" "$ROW_ID"
-    exit 1
-}
-{
+if ! mkdir -p "$(dirname "$STATE_OUT")"; then
+    fail_after_run_registered "Failed to create state output directory: $(dirname "$STATE_OUT")"
+fi
+before_tree="$(snapshot_directory_state "$SNAPSHOT_ROOT")" || fail_after_run_registered "Failed to snapshot directory state before run"
+if ! {
     echo "base_commit=$base_commit"
     echo "before_tree=$before_tree"
 } > "$STATE_OUT"
+then
+    fail_after_run_registered "Failed to write workspace state file: $STATE_OUT"
+fi
 
 # Determine run directory
 run_dir="$SNAPSHOT_ROOT"
 if [[ -n "$WORKDIR" ]]; then
     run_dir="$SNAPSHOT_ROOT/${WORKDIR#./}"
     if [[ ! -d "$run_dir" ]]; then
-        log_error "Working directory not found: $WORKDIR"
-        db_exec "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=?1;" "$ROW_ID"
-        exit 1
+        fail_after_run_registered "Working directory not found: $WORKDIR"
     fi
 fi
 
@@ -454,12 +481,10 @@ if [[ "$exit_code" -eq 124 ]]; then
     log_error "Subagent run timed out after $TIMEOUT_HUMAN"
 fi
 
-after_tree="$(snapshot_directory_state "$SNAPSHOT_ROOT")" || {
-    log_error "Failed to snapshot directory state after run"
-    db_exec "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=?1;" "$ROW_ID"
-    exit 1
-}
-echo "after_tree=$after_tree" >> "$STATE_OUT"
+after_tree="$(snapshot_directory_state "$SNAPSHOT_ROOT")" || fail_after_run_registered "Failed to snapshot directory state after run"
+if ! echo "after_tree=$after_tree" >> "$STATE_OUT"; then
+    fail_after_run_registered "Failed to append workspace state file: $STATE_OUT"
+fi
 
 if [[ "$before_tree" == "$after_tree" ]]; then
     log_info "No directory changes detected between snapshots."
@@ -468,16 +493,29 @@ else
 fi
 
 # Patch creation (workspace state diff)
-mkdir -p "$(dirname "$PATCH_OUT")"
+if ! mkdir -p "$(dirname "$PATCH_OUT")"; then
+    fail_after_run_registered "Failed to create patch directory: $(dirname "$PATCH_OUT")"
+fi
 
 log_info "Writing patch (workspace state diff): $PATCH_OUT"
+patch_ok="true"
 if ! git -C "$SNAPSHOT_ROOT" diff --binary --no-color "$before_tree" "$after_tree" > "$PATCH_OUT" 2>/dev/null; then
     log_error "Patch generation failed (git diff returned non-zero). Trees: before=$before_tree after=$after_tree"
-    # Still continue — patch is best-effort, agent status is what matters
+    patch_ok="false"
 fi
 
 if [[ ! -s "$PATCH_OUT" ]]; then
-    log_warn "Patch is empty. The agent may not have changed any files."
+    if [[ "$before_tree" != "$after_tree" ]]; then
+        log_error "Patch output is empty despite detected directory changes."
+        patch_ok="false"
+    else
+        log_warn "Patch is empty. The agent may not have changed any files."
+    fi
+fi
+
+if [[ "$patch_ok" != "true" ]]; then
+    log_error "Patch generation failed; marking run as failed"
+    exit_code=1
 fi
 
 # Update agent status in database

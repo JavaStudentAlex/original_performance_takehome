@@ -83,7 +83,7 @@ check_sqlite_installed() {
 
 # Escape a value for use inside double-quoted sqlite3 .param set.
 # Escapes backslashes and double-quotes so the value survives sqlite3 parsing.
-# Values with embedded newlines are rejected (not expected in our data model).
+# Newlines are not rejected here; callers enforce any field-specific constraints.
 _param_esc() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }

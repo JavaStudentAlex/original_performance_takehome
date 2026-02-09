@@ -236,7 +236,7 @@ The skill uses a modular script architecture with shared utilities:
   - Git utilities: `ensure_in_git_repo`
   - Time utilities: `make_timestamp`, `seconds_to_human`
   - Validation: `check_copilot_installed`, `check_sqlite_installed`
-  - SQL helpers: `_sql_esc`
+  - SQL helpers: `_param_esc` (used by `db_exec` and `db_query`)
 
 - `scripts/snapshot-utils.sh` - Git directory state management:
   - `snapshot_directory_state` - Creates git tree snapshots for patch generation
