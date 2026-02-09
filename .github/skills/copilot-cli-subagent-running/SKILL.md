@@ -9,7 +9,7 @@ This skill defines how to run the repository's Copilot CLI subagents safely and 
 3. Snapshot workspace directory state (**after**) the agent run
 4. Write a patch from **before -> after** (binary-safe)
 
-The wrapper also writes a small state file at `.github/agent-state/subagents/<timestamp>-<agent>.workspace-state.txt` that records `base_commit`, `before_tree`, and `after_tree` used for patch generation.
+The wrapper also writes a small state file at `.github/agent-state/subagents/<timestamp>-<agent>.workspace-state.txt` that records `base_commit`, `before_tree`, and `after_tree` used for patch generation. The state file is written **after** the patch is generated, so it never contaminates the before/after diff.
 
 **Repo contract:** `.github/copilot-instructions.md` is the top-level contract for how work is done in this repo. This skill must stay consistent with it and should **not** duplicate repository rules or architecture theory--reference `VLIW.md` instead.
 
@@ -124,6 +124,12 @@ For larger context, prefer `--context-file` instead of pasting huge blocks into 
   --prompt "Propose the minimal kernel changes described in STEP.md"
 ```
 
+**Context-file path semantics:**
+- Relative paths are resolved from the **repo root** (not the caller's CWD).
+- Absolute paths must be inside the repo root.
+- Path traversal (`..`) is rejected.
+- Files larger than `--max-inline-context-bytes` (default 65536) are **not** inlined into the prompt. Instead, the wrapper injects a file-read directive telling the agent to read the file using its tools. This avoids `ARG_MAX` failures with very large context files.
+
 ---
 
 ## Wrapper script options
@@ -131,12 +137,15 @@ For larger context, prefer `--context-file` instead of pasting huge blocks into 
 | Flag | Purpose | Example |
 |------|---------|---------|
 | `--prompt <text>` | Task for the agent (required) | `--prompt "Optimize the hash loop"` |
-| `--agent <name>` | Custom agent name | `--agent=memory-opt-expert` |
+| `--agent <name>` | Custom agent name (must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`) | `--agent=memory-opt-expert` |
 | `--model <model>` | AI model override | `--model claude-sonnet-4` |
 | `--workdir <path>` | Working directory inside the repo (and sandbox when enabled) | `--workdir ./src` |
-| `--context-file <file>` | Prepend file contents to prompt | `--context-file STEP.md` |
-| `--allow-tool <tool>` | Allow additional tool (repeatable) | `--allow-tool 'shell(npm run test:*)'` |
-| `--deny-tool <tool>` | Deny additional tool (repeatable) | `--deny-tool 'shell(docker)'` |
+| `--context-file <file>` | Prepend file contents to prompt (resolved from repo root) | `--context-file STEP.md` |
+| `--max-inline-context-bytes <N>` | Max context file size to inline in prompt (default: 65536). Larger files use file-reference mode. | `--max-inline-context-bytes 131072` |
+| `--tool-policy <policy>` | Tool permission policy: `allowlist` (default) or `legacy-denylist` | `--tool-policy=legacy-denylist` |
+| `--allow-all-tools-unsafe` | Shortcut for `--tool-policy=legacy-denylist` (restores old behavior) | |
+| `--allow-tool <tool>` | Additional tool to allow (repeatable, merged with policy) | `--allow-tool 'shell(npm run test:*)'` |
+| `--deny-tool <tool>` | Deny additional tool (repeatable, applied in all policies) | `--deny-tool 'shell(docker)'` |
 | `--allow-urls` | Allow network access | |
 | `--allow-paths` | Allow all path access | |
 | `--dry-run` | Print command without executing | |
@@ -175,6 +184,13 @@ The agent is trusted to run its own quality gates inside the sandbox.
 
 **Agent tracking:** every run (sandboxed or not) is recorded in `agents.db` at the repo root with columns: `id`, `agent_name`, `agent_path`, `agent_sandbox`, `agent_status`.
 
+**Agent status values:** `pending`, `running`, `completed`, `failed`, `interrupted`.
+
+**Signal handling:** If the wrapper receives SIGINT (Ctrl+C), SIGTERM, or SIGHUP during a run, it performs graceful cleanup:
+- Updates the DB row to `interrupted` (instead of leaving it stuck as `running`).
+- In sandbox mode, cleans up the worktree.
+- Exits with the conventional signal code (130/143/129).
+
 ---
 
 ## Model selection
@@ -191,10 +207,21 @@ Availability depends on your Copilot plan / org policy.
 
 ## Tool permissions and safety
 
-The wrapper runs with broad tool access but **denies destructive commands by default**:
+The wrapper uses an **allowlist-based tool policy** by default. Only a conservative set of tools is allowed unless the agent definition specifies its own tool list.
 
+**Default policy: `allowlist`**
+
+The wrapper builds the allowed tool set from:
+1. The agent's definition file (`~/.copilot/agents/<agent>.agent.md` or `.github/agents/<agent>.agent.md`), if it contains a tools block.
+2. If no agent-specific tools are found, a conservative fallback set: `read`, `search`, `execute`, `edit`, `agent`, `todo`, `web`, `vscode`.
+
+Destructive commands are always denied as defense-in-depth:
 - `shell(rm)`, `shell(rm -rf)`, `shell(rmdir)`
 - `shell(git push)`, `shell(git push --force)`, `shell(git push -f)`
+
+**Effective tool set:** `(policy_allowlist + --allow-tool flags) - (default_denies + --deny-tool flags)`
+
+**Legacy mode:** Use `--tool-policy=legacy-denylist` or `--allow-all-tools-unsafe` to restore the previous behavior (allow all tools, deny destructive ones only). This is an explicit opt-in for backward compatibility.
 
 Add more restrictions as needed:
 
@@ -236,7 +263,7 @@ The skill uses a modular script architecture with shared utilities:
   - Git utilities: `ensure_in_git_repo`
   - Time utilities: `make_timestamp`, `seconds_to_human`
   - Validation: `check_copilot_installed`, `check_sqlite_installed`
-  - SQL helpers: `_param_esc` (used by `db_exec` and `db_query`)
+  - SQL helpers: `_param_esc` (escapes values for sqlite3 `.param set`; rejects newlines/CR to prevent injection), `db_exec`, `db_query`
 
 - `scripts/snapshot-utils.sh` - Git directory state management:
   - `snapshot_directory_state` - Creates git tree snapshots for patch generation
@@ -289,7 +316,12 @@ Guideline: store the full output in the log, and only a short, high-signal summa
 | `GitHub Copilot CLI is not installed` | CLI missing | Install and ensure `copilot` is on PATH |
 | `sqlite3 is required for agent run tracking` | `sqlite3` missing | Install sqlite3 and rerun |
 | `Authentication failed` | Token/auth issue | Re-authenticate with `gh auth login` |
-| `Tool denied` | Missing permission | Add `--allow-tool ...` or adjust deny patterns |
+| `Tool denied` | Missing permission | Add `--allow-tool ...`, adjust deny patterns, or use `--allow-all-tools-unsafe` |
+| `Invalid --agent value` | Agent name has invalid characters | Use alphanumeric, dot, hyphen, underscore only (max 64 chars, must start alphanumeric) |
+| `Missing value for --prompt (next argument looks like a flag)` | Flag used as value | Use `--prompt="--value"` form for values starting with `--` |
+| `Context file not found (resolved from repo root)` | Relative path not found from repo root | Paths are resolved from repo root, not CWD |
+| `Context file exceeds ... bytes` | Large context file | Normal operation; file-reference mode is used instead of inlining |
+| `_param_esc: value contains newline` | Newline in a DB parameter | Agent name or other parameter has invalid newline/CR character |
 | `124` exit code | Timeout | Reduce scope or split the task |
 
 ---
@@ -300,6 +332,9 @@ Guideline: store the full output in the log, and only a short, high-signal summa
 |------|---------|
 | `0` | Success |
 | `124` | Timed out (1-hour hard limit) |
+| `129` | Interrupted by SIGHUP |
+| `130` | Interrupted by SIGINT (Ctrl+C) |
+| `143` | Interrupted by SIGTERM |
 | Other | Propagated from underlying `copilot` command |
 
 ---

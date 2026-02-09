@@ -83,8 +83,14 @@ check_sqlite_installed() {
 
 # Escape a value for use inside double-quoted sqlite3 .param set.
 # Escapes backslashes and double-quotes so the value survives sqlite3 parsing.
-# Newlines are not rejected here; callers enforce any field-specific constraints.
+# REJECTS newlines: sqlite3 dot-commands are line-oriented, so a newline in a
+# .param set value would split the command and the remainder would be interpreted
+# as a new command — creating a SQL/dot-command injection vulnerability.
 _param_esc() {
+    if [[ "$1" == *$'\n'* ]] || [[ "$1" == *$'\r'* ]]; then
+        log_error "_param_esc: value contains newline/carriage-return (unsupported by sqlite3 .param set)"
+        return 1
+    fi
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
@@ -100,7 +106,12 @@ db_exec() {
     local param_cmds=""
     local i=1
     for val in "$@"; do
-        param_cmds="${param_cmds}.param set ?${i} \"$(_param_esc "$val")\"
+        local escaped=""
+        escaped="$(_param_esc "$val")" || {
+            log_error "Failed to escape sqlite parameter ?${i} (newline/CR not supported)"
+            return 1
+        }
+        param_cmds="${param_cmds}.param set ?${i} \"${escaped}\"
 "
         i=$((i + 1))
     done
@@ -121,7 +132,12 @@ db_query() {
     local param_cmds=""
     local i=1
     for val in "$@"; do
-        param_cmds="${param_cmds}.param set ?${i} \"$(_param_esc "$val")\"
+        local escaped=""
+        escaped="$(_param_esc "$val")" || {
+            log_error "Failed to escape sqlite parameter ?${i} (newline/CR not supported)"
+            return 1
+        }
+        param_cmds="${param_cmds}.param set ?${i} \"${escaped}\"
 "
         i=$((i + 1))
     done

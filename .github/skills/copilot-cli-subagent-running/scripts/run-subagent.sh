@@ -80,8 +80,11 @@ Optional:
     --model <model>             AI model override (default: $DEFAULT_MODEL)
     --workdir <path>            Working directory inside the repo
     --context-file <file>       File containing additional context to prepend to prompt
+    --tool-policy <policy>      Tool permission policy: 'allowlist' (default) or 'legacy-denylist'
+    --allow-all-tools-unsafe    Shortcut for --tool-policy=legacy-denylist
     --allow-tool <tool>         Additional tool to allow (repeatable)
     --deny-tool <tool>          Additional tool to deny (repeatable)
+    --max-inline-context-bytes <N>  Max context file size to inline (default: 65536)
     --allow-urls                Allow network access (--allow-all-urls)
     --allow-paths               Allow all path access (--allow-all-paths)
     --dry-run                   Print actions/command without executing
@@ -162,6 +165,8 @@ ALLOW_PATHS="false"
 DRY_RUN="false"
 VERBOSE="false"
 PATCH_OUT=""
+MAX_INLINE_CONTEXT_BYTES=65536
+TOOL_POLICY="allowlist"
 USE_SANDBOX="false"
 SANDBOX_CLEANUP_ON_SUCCESS="true"
 SANDBOX_CLEANUP_ON_FAILURE="false"
@@ -169,8 +174,16 @@ SANDBOX_CLEANUP_ON_FAILURE="false"
 require_value() {
     local opt="$1"
     local remaining="$2"
+    local next_val="${3:-}"
     if [[ "$remaining" -lt 2 ]]; then
         log_error "Missing value for $opt"
+        print_usage
+        exit 1
+    fi
+    # Detect when the next token looks like another flag (starts with --).
+    # Use --opt=value form if the value legitimately starts with dashes.
+    if [[ -n "$next_val" ]] && [[ "$next_val" == --* ]]; then
+        log_error "Missing value for $opt (next argument '$next_val' looks like a flag; use ${opt}=<value> if the value starts with '--')"
         print_usage
         exit 1
     fi
@@ -179,37 +192,37 @@ require_value() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --prompt)
-            require_value "--prompt" "$#"
+            require_value "--prompt" "$#" "${2:-}"
             PROMPT="$2"; shift 2 ;;
         --prompt=*)
             PROMPT="${1#*=}"; shift ;;
         --agent)
-            require_value "--agent" "$#"
+            require_value "--agent" "$#" "${2:-}"
             AGENT="$2"; shift 2 ;;
         --agent=*)
             AGENT="${1#*=}"; shift ;;
         --model)
-            require_value "--model" "$#"
+            require_value "--model" "$#" "${2:-}"
             MODEL="$2"; shift 2 ;;
         --model=*)
             MODEL="${1#*=}"; shift ;;
         --workdir)
-            require_value "--workdir" "$#"
+            require_value "--workdir" "$#" "${2:-}"
             WORKDIR="$2"; shift 2 ;;
         --workdir=*)
             WORKDIR="${1#*=}"; shift ;;
         --context-file)
-            require_value "--context-file" "$#"
+            require_value "--context-file" "$#" "${2:-}"
             CONTEXT_FILE="$2"; shift 2 ;;
         --context-file=*)
             CONTEXT_FILE="${1#*=}"; shift ;;
         --allow-tool)
-            require_value "--allow-tool" "$#"
+            require_value "--allow-tool" "$#" "${2:-}"
             EXTRA_ALLOW_TOOLS+=("$2"); shift 2 ;;
         --allow-tool=*)
             EXTRA_ALLOW_TOOLS+=("${1#*=}"); shift ;;
         --deny-tool)
-            require_value "--deny-tool" "$#"
+            require_value "--deny-tool" "$#" "${2:-}"
             EXTRA_DENY_TOOLS+=("$2"); shift 2 ;;
         --deny-tool=*)
             EXTRA_DENY_TOOLS+=("${1#*=}"); shift ;;
@@ -222,10 +235,22 @@ while [[ $# -gt 0 ]]; do
         --verbose)
             VERBOSE="true"; shift ;;
         --patch-out)
-            require_value "--patch-out" "$#"
+            require_value "--patch-out" "$#" "${2:-}"
             PATCH_OUT="$2"; shift 2 ;;
         --patch-out=*)
             PATCH_OUT="${1#*=}"; shift ;;
+        --max-inline-context-bytes)
+            require_value "--max-inline-context-bytes" "$#" "${2:-}"
+            MAX_INLINE_CONTEXT_BYTES="$2"; shift 2 ;;
+        --max-inline-context-bytes=*)
+            MAX_INLINE_CONTEXT_BYTES="${1#*=}"; shift ;;
+        --tool-policy)
+            require_value "--tool-policy" "$#" "${2:-}"
+            TOOL_POLICY="$2"; shift 2 ;;
+        --tool-policy=*)
+            TOOL_POLICY="${1#*=}"; shift ;;
+        --allow-all-tools-unsafe)
+            TOOL_POLICY="legacy-denylist"; shift ;;
         --sandbox)
             USE_SANDBOX="true"; shift ;;
         --no-cleanup-on-success)
@@ -249,16 +274,34 @@ if [[ -z "$PROMPT" ]]; then
     exit 1
 fi
 
+# Validate agent name (P06): reject unsafe characters before any DB/sandbox work.
+# Allowed: alphanumeric, dot, hyphen, underscore. Must start with alphanumeric.
+# Max 64 characters. Empty is allowed (means "auto" / no custom agent).
+if [[ -n "$AGENT" ]]; then
+    if ! [[ "$AGENT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+        log_error "Invalid --agent value: '$AGENT'"
+        log_error "Agent name must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ (alphanumeric start, max 64 chars, no whitespace/slashes/newlines)"
+        exit 1
+    fi
+fi
+
+# Validate tool-policy value
+case "$TOOL_POLICY" in
+    allowlist|legacy-denylist) ;;
+    *)
+        log_error "Invalid --tool-policy: '$TOOL_POLICY' (must be 'allowlist' or 'legacy-denylist')"
+        exit 1
+        ;;
+esac
+
 ensure_in_git_repo
 if [[ "$DRY_RUN" != "true" ]]; then
     check_copilot_installed
     check_sqlite_installed
 fi
 
-if [[ -n "$CONTEXT_FILE" ]] && [[ ! -f "$CONTEXT_FILE" ]]; then
-    log_error "Context file not found: $CONTEXT_FILE"
-    exit 1
-fi
+# Note: context-file validation is deferred until after PROJECT_ROOT is computed
+# (see P04/G03 — repo-root-relative path resolution).
 
 if [[ -n "$WORKDIR" ]]; then
     # WORKDIR is interpreted relative to repo root.
@@ -296,14 +339,83 @@ if [[ -n "$AGENT" ]]; then
     CMD+=(--agent="$AGENT")
 fi
 
-CMD+=(--allow-all-tools)
+# --- Tool policy (P05/G02) ---
+# Conservative fallback allowlist when no agent-specific tools are found.
+DEFAULT_ALLOWLIST_TOOLS=(
+    "read"
+    "search"
+    "execute"
+    "edit"
+    "agent"
+    "todo"
+    "web"
+    "vscode"
+)
 
+log_verbose "Tool policy: $TOOL_POLICY"
+
+if [[ "$TOOL_POLICY" == "legacy-denylist" ]]; then
+    # Legacy mode: allow all tools, deny destructive ones (original behavior).
+    CMD+=(--allow-all-tools)
+    log_verbose "Tool policy: legacy-denylist (--allow-all-tools with deny patterns)"
+else
+    # Allowlist mode (default): build tool set from agent definition or fallback.
+    ALLOWLIST_TOOLS=()
+    ALLOWLIST_SOURCE=""
+
+    # Try to parse tools from agent definition file.
+    # Resolution order: user-global first, then repo-local.
+    AGENT_DEF_FILE=""
+    if [[ -n "$AGENT" ]]; then
+        if [[ -f "$HOME/.copilot/agents/${AGENT}.agent.md" ]]; then
+            AGENT_DEF_FILE="$HOME/.copilot/agents/${AGENT}.agent.md"
+        elif [[ -f "$(git rev-parse --show-toplevel 2>/dev/null)/.github/agents/${AGENT}.agent.md" ]]; then
+            AGENT_DEF_FILE="$(git rev-parse --show-toplevel)/.github/agents/${AGENT}.agent.md"
+        fi
+    fi
+
+    if [[ -n "$AGENT_DEF_FILE" ]]; then
+        # Parse tools from agent file: look for lines matching "- tool: <name>"
+        # or a YAML/markdown tools block. Simple line-based extraction.
+        while IFS= read -r line; do
+            # Match lines like "- tool: read" or "- read" under a tools section
+            tool_name=""
+            if [[ "$line" =~ ^[[:space:]]*-[[:space:]]+tool:[[:space:]]*(.+)$ ]]; then
+                tool_name="${BASH_REMATCH[1]}"
+            fi
+            if [[ -n "$tool_name" ]]; then
+                # Trim whitespace
+                tool_name="$(echo "$tool_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                ALLOWLIST_TOOLS+=("$tool_name")
+            fi
+        done < "$AGENT_DEF_FILE"
+        if [[ ${#ALLOWLIST_TOOLS[@]} -gt 0 ]]; then
+            ALLOWLIST_SOURCE="agent-definition ($AGENT_DEF_FILE)"
+        fi
+    fi
+
+    if [[ ${#ALLOWLIST_TOOLS[@]} -eq 0 ]]; then
+        # No tools parsed from agent definition — use conservative fallback.
+        ALLOWLIST_TOOLS=("${DEFAULT_ALLOWLIST_TOOLS[@]}")
+        ALLOWLIST_SOURCE="default-fallback"
+    fi
+
+    # Add allowlist tools
+    for tool in "${ALLOWLIST_TOOLS[@]}"; do
+        CMD+=(--allow-tool "$tool")
+    done
+    log_verbose "Allowlist source: $ALLOWLIST_SOURCE"
+    log_verbose "Allowlist tools: ${ALLOWLIST_TOOLS[*]}"
+fi
+
+# Always apply deny patterns as defense-in-depth (both policies).
 for tool in "${DENIED_TOOLS[@]}"; do
     CMD+=(--deny-tool "$tool")
 done
 for tool in "${EXTRA_DENY_TOOLS[@]}"; do
     CMD+=(--deny-tool "$tool")
 done
+# Extra allow-tools from CLI override (union with policy allowlist).
 for tool in "${EXTRA_ALLOW_TOOLS[@]}"; do
     CMD+=(--allow-tool "$tool")
 done
@@ -315,25 +427,6 @@ if [[ "$ALLOW_PATHS" == "true" ]]; then
     CMD+=(--allow-all-paths)
 fi
 
-CONTRACT_DIRECTIVE="READ FIRST: .github/copilot-instructions.md"
-FULL_PROMPT="$CONTRACT_DIRECTIVE
-
-$PROMPT"
-if [[ -n "$CONTEXT_FILE" ]]; then
-    CONTEXT_CONTENT=$(cat "$CONTEXT_FILE")
-    FULL_PROMPT="$CONTRACT_DIRECTIVE
-
-CONTEXT FROM FILE ($CONTEXT_FILE):
----
-$CONTEXT_CONTENT
----
-
-TASK:
-$PROMPT"
-fi
-
-CMD+=(-p "$FULL_PROMPT")
-
 # ==============================================================================
 # Execute
 # ==============================================================================
@@ -344,6 +437,71 @@ TS="$(make_timestamp)"
 
 PROJECT_ROOT="$(git rev-parse --show-toplevel)"
 
+# --- Context-file resolution (P04/G03): repo-root-relative semantics ---
+CONTEXT_FILE_REPO_ABS=""
+if [[ -n "$CONTEXT_FILE" ]]; then
+    if [[ "$CONTEXT_FILE" = /* ]]; then
+        # Absolute path: must be inside repo root
+        case "$CONTEXT_FILE" in
+            "$PROJECT_ROOT"/*)
+                CONTEXT_FILE_REPO_ABS="$CONTEXT_FILE"
+                ;;
+            *)
+                log_error "--context-file absolute path must be inside the repo root ($PROJECT_ROOT): $CONTEXT_FILE"
+                exit 1
+                ;;
+        esac
+    else
+        # Relative path: resolve from PROJECT_ROOT (not caller CWD)
+        case "$CONTEXT_FILE" in
+            ..|../*|*/..|*/../*)
+                log_error "--context-file must not contain '..' (path traversal): $CONTEXT_FILE"
+                exit 1
+                ;;
+        esac
+        CONTEXT_FILE_REPO_ABS="$PROJECT_ROOT/$CONTEXT_FILE"
+    fi
+    if [[ ! -f "$CONTEXT_FILE_REPO_ABS" ]]; then
+        log_error "Context file not found: $CONTEXT_FILE_REPO_ABS (resolved from repo root)"
+        exit 1
+    fi
+fi
+
+# --- Prompt assembly (P03): handle large context files ---
+CONTRACT_DIRECTIVE="READ FIRST: .github/copilot-instructions.md"
+FULL_PROMPT="$CONTRACT_DIRECTIVE
+
+$PROMPT"
+if [[ -n "$CONTEXT_FILE_REPO_ABS" ]]; then
+    context_size=$(wc -c < "$CONTEXT_FILE_REPO_ABS")
+    log_verbose "Context file size: $context_size bytes (max inline: $MAX_INLINE_CONTEXT_BYTES)"
+    if [[ "$context_size" -le "$MAX_INLINE_CONTEXT_BYTES" ]]; then
+        # Small enough to inline
+        CONTEXT_CONTENT=$(cat "$CONTEXT_FILE_REPO_ABS")
+        FULL_PROMPT="$CONTRACT_DIRECTIVE
+
+CONTEXT FROM FILE ($CONTEXT_FILE):
+---
+$CONTEXT_CONTENT
+---
+
+TASK:
+$PROMPT"
+    else
+        # Too large to inline — inject a file-read directive instead
+        log_warn "Context file exceeds ${MAX_INLINE_CONTEXT_BYTES} bytes ($context_size bytes). Using file-reference mode to avoid ARG_MAX issues."
+        FULL_PROMPT="$CONTRACT_DIRECTIVE
+
+IMPORTANT: READ THIS FILE FIRST before starting work: $CONTEXT_FILE_REPO_ABS
+(Context file too large to inline — $context_size bytes. You must read it using your file-read tool.)
+
+TASK:
+$PROMPT"
+    fi
+fi
+
+CMD+=(-p "$FULL_PROMPT")
+
 if [[ -z "$PATCH_OUT" ]]; then
     PATCH_OUT="$PROJECT_ROOT/.github/agent-state/patches/${TS}-${AGENT_FOR_NAMES}.patch"
 elif [[ "$PATCH_OUT" != /* ]]; then
@@ -352,6 +510,7 @@ fi
 
 log_verbose "Model: $MODEL"
 log_verbose "Agent: ${AGENT:-<auto>}"
+log_verbose "Tool policy: $TOOL_POLICY"
 log_verbose "Denied tools: ${DENIED_TOOLS[*]} ${EXTRA_DENY_TOOLS[*]:-}"
 log_verbose "Extra allowed tools: ${EXTRA_ALLOW_TOOLS[*]:-<none>}"
 log_verbose "Max runtime: $TIMEOUT_HUMAN"
@@ -432,6 +591,41 @@ fail_after_run_registered() {
     exit 1
 }
 
+# P07+G04: Signal trap for cleanup on interrupt.
+# If the script is interrupted after the DB row is created but before the
+# final status update, mark the row as 'interrupted' and optionally clean up
+# the sandbox. RUN_FINALIZED guards against race with normal finalization.
+RUN_FINALIZED="false"
+cleanup_on_signal() {
+    local sig="$1"
+    if [[ "$RUN_FINALIZED" == "true" ]]; then
+        # Normal finalization already completed; just exit with signal code.
+        case "$sig" in
+            INT)  exit 130 ;;
+            TERM) exit 143 ;;
+            HUP)  exit 129 ;;
+            *)    exit 1 ;;
+        esac
+    fi
+    log_warn "Received signal $sig — cleaning up agent run id=$ROW_ID..."
+    db_exec "$DB_FILE" \
+        "UPDATE agents SET agent_status='interrupted' WHERE id=?1;" \
+        "$ROW_ID" || true
+    if [[ "$USE_SANDBOX" == "true" ]] && [[ -n "${SANDBOX_DIR:-}" ]]; then
+        log_warn "Cleaning up sandbox after interruption: $SANDBOX_DIR"
+        "$SCRIPTS_DIR/sandbox-cleanup.sh" "$SANDBOX_DIR" 2>/dev/null || true
+    fi
+    case "$sig" in
+        INT)  exit 130 ;;
+        TERM) exit 143 ;;
+        HUP)  exit 129 ;;
+        *)    exit 1 ;;
+    esac
+}
+trap 'cleanup_on_signal INT'  INT
+trap 'cleanup_on_signal TERM' TERM
+trap 'cleanup_on_signal HUP'  HUP
+
 exit_code=0
 base_commit="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
 
@@ -444,18 +638,13 @@ fi
 # Snapshot directory state before the run (baseline for patch generation).
 # Note: creates git tree objects that become dangling after the diff.
 # These are cleaned up by periodic `git gc` (automatic on most systems).
+# P01: State file is written AFTER patch generation to avoid contaminating
+# the before/after diff window. We only prepare the output dir here.
 STATE_OUT="$PROJECT_ROOT/.github/agent-state/subagents/${TS}-${AGENT_FOR_NAMES}.workspace-state.txt"
 if ! mkdir -p "$(dirname "$STATE_OUT")"; then
     fail_after_run_registered "Failed to create state output directory: $(dirname "$STATE_OUT")"
 fi
 before_tree="$(snapshot_directory_state "$SNAPSHOT_ROOT")" || fail_after_run_registered "Failed to snapshot directory state before run"
-if ! {
-    echo "base_commit=$base_commit"
-    echo "before_tree=$before_tree"
-} > "$STATE_OUT"
-then
-    fail_after_run_registered "Failed to write workspace state file: $STATE_OUT"
-fi
 
 # Determine run directory
 run_dir="$SNAPSHOT_ROOT"
@@ -482,9 +671,6 @@ if [[ "$exit_code" -eq 124 ]]; then
 fi
 
 after_tree="$(snapshot_directory_state "$SNAPSHOT_ROOT")" || fail_after_run_registered "Failed to snapshot directory state after run"
-if ! echo "after_tree=$after_tree" >> "$STATE_OUT"; then
-    fail_after_run_registered "Failed to append workspace state file: $STATE_OUT"
-fi
 
 if [[ "$before_tree" == "$after_tree" ]]; then
     log_info "No directory changes detected between snapshots."
@@ -499,10 +685,18 @@ fi
 
 log_info "Writing patch (workspace state diff): $PATCH_OUT"
 patch_ok="true"
-if ! git -C "$SNAPSHOT_ROOT" diff --binary --no-color "$before_tree" "$after_tree" > "$PATCH_OUT" 2>/dev/null; then
+# P09: Capture stderr to a temp file instead of discarding it, so we can
+# log the actual diagnostic on failure (not just "returned non-zero").
+_diff_stderr_file="$(mktemp)"
+if ! git -C "$SNAPSHOT_ROOT" diff --binary --no-color "$before_tree" "$after_tree" \
+        > "$PATCH_OUT" 2>"$_diff_stderr_file"; then
     log_error "Patch generation failed (git diff returned non-zero). Trees: before=$before_tree after=$after_tree"
+    if [[ -s "$_diff_stderr_file" ]]; then
+        log_error "git diff stderr: $(cat "$_diff_stderr_file")"
+    fi
     patch_ok="false"
 fi
+rm -f "$_diff_stderr_file"
 
 if [[ ! -s "$PATCH_OUT" ]]; then
     if [[ "$before_tree" != "$after_tree" ]]; then
@@ -518,12 +712,26 @@ if [[ "$patch_ok" != "true" ]]; then
     exit_code=1
 fi
 
+# P01: Write state file AFTER patch generation to avoid contaminating the diff.
+if ! {
+    echo "base_commit=$base_commit"
+    echo "before_tree=$before_tree"
+    echo "after_tree=$after_tree"
+} > "$STATE_OUT"
+then
+    log_warn "Failed to write workspace state file: $STATE_OUT"
+fi
+
 # Update agent status in database
 if [[ "$exit_code" -eq 0 ]]; then
     db_exec "$DB_FILE" "UPDATE agents SET agent_status='completed' WHERE id=?1;" "$ROW_ID"
 else
     db_exec "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=?1;" "$ROW_ID"
 fi
+
+# G04: Mark finalization complete and disarm signal trap to prevent race.
+RUN_FINALIZED="true"
+trap - INT TERM HUP
 
 # Sandbox cleanup
 if [[ "$USE_SANDBOX" == "true" ]] && [[ -n "$SANDBOX_DIR" ]]; then
