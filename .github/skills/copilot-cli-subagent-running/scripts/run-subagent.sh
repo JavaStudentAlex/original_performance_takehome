@@ -5,6 +5,8 @@
 # (repo root by default, or --workdir <path>) and produces a patch of the
 # directory-state diff (before/after snapshots; commits optional).
 #
+# Use --sandbox to run the agent in an isolated git worktree instead.
+#
 # Usage:
 #   ./run-subagent.sh --agent=<agent-name> --prompt "<prompt>"
 #
@@ -12,6 +14,7 @@
 #   ./run-subagent.sh --agent=compilers-expert --prompt "Optimize the VLIW bundler"
 #   ./run-subagent.sh --agent=test-expert --workdir ./tests --prompt "Write unit tests"
 #   ./run-subagent.sh --agent=planner --context-file STEP.md --prompt "Follow STEP.md"
+#   ./run-subagent.sh --agent=memory-opt-expert --prompt "Optimize" --sandbox
 #
 # Note:
 #   This wrapper always writes a patch capturing the workspace changes made
@@ -22,6 +25,13 @@ set -euo pipefail
 # ==============================================================================
 # Configuration
 # ==============================================================================
+
+# Directory containing this script (used to locate sandbox helper scripts)
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source shared utilities
+source "$SCRIPTS_DIR/common-utils.sh"
+source "$SCRIPTS_DIR/snapshot-utils.sh"
 
 # Max runtime for a single subagent invocation.
 # Default is 1 hour (3600s). If exceeded, the job is terminated and the wrapper
@@ -70,6 +80,11 @@ Optional:
     --dry-run                   Print actions/command without executing
     --verbose                   Print debug information
 
+Sandbox mode (--sandbox):
+    --sandbox                   Run agent in an isolated git worktree sandbox
+    --no-cleanup-on-success     Keep sandbox after successful run (default: clean up)
+    --cleanup-on-failure        Remove sandbox even on failure (default: preserve for debug)
+
 Output:
     --patch-out <path>          Where to write the patch (default: .github/agent-state/patches/<ts>-<agent>.patch)
 
@@ -78,63 +93,12 @@ Examples:
     $(basename "$0") --agent=test-expert --model gpt-5 --prompt "Write unit tests"
     $(basename "$0") --agent=planner --workdir ./src --prompt "Analyze this module"
     $(basename "$0") --prompt "Refactor this" --context-file STEP.md
+    $(basename "$0") --agent=memory-opt-expert --prompt "Optimize" --sandbox
 
 Tool Permission Examples:
     $(basename "$0") --prompt "..." --allow-tool 'shell(npm run test:*)'
     $(basename "$0") --prompt "..." --deny-tool 'shell(docker)'
 EOF
-}
-
-log_verbose() {
-    if [[ "${VERBOSE:-false}" == "true" ]]; then
-        echo "[VERBOSE] $*" >&2
-    fi
-}
-
-log_info() {
-    echo "[INFO] $*" >&2
-}
-
-log_warn() {
-    echo "[WARN] $*" >&2
-}
-
-log_error() {
-    echo "[ERROR] $*" >&2
-}
-
-seconds_to_human() {
-    local total=$1
-    local h=$(( total / 3600 ))
-    local m=$(( (total % 3600) / 60 ))
-    local s=$(( total % 60 ))
-
-    if (( h > 0 )); then
-        printf '%dh %dm %ds' "$h" "$m" "$s"
-    elif (( m > 0 )); then
-        printf '%dm %ds' "$m" "$s"
-    else
-        printf '%ds' "$s"
-    fi
-}
-
-check_copilot_installed() {
-    if ! command -v copilot &> /dev/null; then
-        log_error "GitHub Copilot CLI is not installed."
-        log_error "Install with: npm install -g @github/copilot"
-        exit 1
-    fi
-}
-
-ensure_in_git_repo() {
-    if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
-        log_error "Not inside a git repository."
-        exit 1
-    fi
-}
-
-make_timestamp() {
-    date -u +"%Y%m%dT%H%M%SZ"
 }
 
 run_with_timeout() {
@@ -175,27 +139,6 @@ run_with_timeout() {
     wait "$pid"
 }
 
-snapshot_directory_state() {
-    # Snapshot current directory state into a git tree object.
-    # Captures tracked + untracked files; excludes ignored files.
-    # Uses a temporary alternate index so it does not disturb the repo's real index.
-    local repo="$1"
-    local tmpdir
-    local idx
-
-    tmpdir="$(mktemp -d -t subagent-index.XXXXXX)"
-    idx="$tmpdir/index"
-
-    # Populate the temporary index with the current working tree contents.
-    GIT_INDEX_FILE="$idx" git -C "$repo" add -A >/dev/null
-
-    local tree
-    tree="$(GIT_INDEX_FILE="$idx" git -C "$repo" write-tree)"
-
-    rm -rf "$tmpdir"
-    echo "$tree"
-}
-
 # ==============================================================================
 # Argument Parsing
 # ==============================================================================
@@ -212,6 +155,9 @@ ALLOW_PATHS="false"
 DRY_RUN="false"
 VERBOSE="false"
 PATCH_OUT=""
+USE_SANDBOX="false"
+SANDBOX_CLEANUP_ON_SUCCESS="true"
+SANDBOX_CLEANUP_ON_FAILURE="false"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -255,7 +201,12 @@ while [[ $# -gt 0 ]]; do
             PATCH_OUT="$2"; shift 2 ;;
         --patch-out=*)
             PATCH_OUT="${1#*=}"; shift ;;
-
+        --sandbox)
+            USE_SANDBOX="true"; shift ;;
+        --no-cleanup-on-success)
+            SANDBOX_CLEANUP_ON_SUCCESS="false"; shift ;;
+        --cleanup-on-failure)
+            SANDBOX_CLEANUP_ON_FAILURE="true"; shift ;;
         --help|-h)
             print_usage; exit 0 ;;
         *)
@@ -290,6 +241,15 @@ if [[ -n "$WORKDIR" ]]; then
         log_error "--workdir must be a relative path"
         exit 1
     fi
+fi
+
+if [[ "$USE_SANDBOX" == "true" ]]; then
+    for helper in sandbox-create.sh sandbox-cleanup.sh; do
+        if [[ ! -x "$SCRIPTS_DIR/$helper" ]]; then
+            log_error "Sandbox helper not found or not executable: $SCRIPTS_DIR/$helper"
+            exit 1
+        fi
+    done
 fi
 
 # ==============================================================================
@@ -358,32 +318,76 @@ log_verbose "Denied tools: ${DENIED_TOOLS[*]} ${EXTRA_DENY_TOOLS[*]:-}"
 log_verbose "Extra allowed tools: ${EXTRA_ALLOW_TOOLS[*]:-<none>}"
 log_verbose "Max runtime: $TIMEOUT_HUMAN"
 log_verbose "Working directory: ${WORKDIR:-.}"
+log_verbose "Sandbox mode: $USE_SANDBOX"
 
 if [[ "$DRY_RUN" == "true" ]]; then
     echo "DRY RUN - Would execute in workspace:" >&2
     echo "  cd ${WORKDIR:-.} && ${CMD[*]}" >&2
     echo "  write patch (state diff): $PATCH_OUT" >&2
+    [[ "$USE_SANDBOX" == "true" ]] && echo "  sandbox: create worktree, run agent inside it" >&2
     exit 0
 fi
+
+# Initialize SQLite database for agent tracking
+DB_FILE="$PROJECT_ROOT/agents.db"
+sqlite3 "$DB_FILE" "CREATE TABLE IF NOT EXISTS agents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    agent_path TEXT,
+    agent_sandbox TEXT,
+    agent_status TEXT NOT NULL DEFAULT 'pending'
+);"
+
+# Resolve agent definition path
+AGENT_PATH=""
+if [[ -n "$AGENT" ]] && [[ -f "$PROJECT_ROOT/.github/agents/${AGENT}.agent.md" ]]; then
+    AGENT_PATH=".github/agents/${AGENT}.agent.md"
+fi
+
+# Create sandbox if requested
+SANDBOX_DIR=""
+if [[ "$USE_SANDBOX" == "true" ]]; then
+    log_info "Creating sandbox for agent: $AGENT_FOR_NAMES"
+    sandbox_output=$("$SCRIPTS_DIR/sandbox-create.sh" "$AGENT_FOR_NAMES")
+    SANDBOX_DIR=$(printf '%s\n' "$sandbox_output" | grep '^SANDBOX_DIR=' | cut -d= -f2-)
+    if [[ -z "$SANDBOX_DIR" ]]; then
+        log_error "Failed to create sandbox (could not parse SANDBOX_DIR)"
+        exit 1
+    fi
+    log_info "Sandbox created: $SANDBOX_DIR"
+fi
+
+# Record agent run in database
+ROW_ID=$(sqlite3 "$DB_FILE" "INSERT INTO agents (agent_name, agent_path, agent_sandbox, agent_status)
+    VALUES ('$(_sql_esc "$AGENT_FOR_NAMES")', '$(_sql_esc "$AGENT_PATH")', '$(_sql_esc "$SANDBOX_DIR")', 'running');
+    SELECT last_insert_rowid();")
+log_verbose "Agent run recorded in agents.db (id=$ROW_ID)"
 
 exit_code=0
 base_commit="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
 
+# In sandbox mode, snapshot and run from the worktree; otherwise use main workspace
+SNAPSHOT_ROOT="$PROJECT_ROOT"
+if [[ "$USE_SANDBOX" == "true" ]] && [[ -n "$SANDBOX_DIR" ]]; then
+    SNAPSHOT_ROOT="$SANDBOX_DIR"
+fi
+
 # Snapshot directory state before the run (baseline for patch generation).
 STATE_OUT="$PROJECT_ROOT/.github/agent-state/subagents/${TS}-${AGENT_FOR_NAMES}.workspace-state.txt"
 mkdir -p "$(dirname "$STATE_OUT")"
-before_tree="$(snapshot_directory_state "$PROJECT_ROOT")"
+before_tree="$(snapshot_directory_state "$SNAPSHOT_ROOT")"
 {
     echo "base_commit=$base_commit"
     echo "before_tree=$before_tree"
 } > "$STATE_OUT"
 
-# Run agent inside workspace
-run_dir="$PROJECT_ROOT"
-if [[ -n "$WORKDIR" ]]; then
+# Determine run directory
+run_dir="$SNAPSHOT_ROOT"
+if [[ "$USE_SANDBOX" != "true" ]] && [[ -n "$WORKDIR" ]]; then
     run_dir="$PROJECT_ROOT/${WORKDIR#./}"
     if [[ ! -d "$run_dir" ]]; then
         log_error "Working directory not found in workspace: $WORKDIR"
+        sqlite3 "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=$ROW_ID;"
         exit 1
     fi
 fi
@@ -399,7 +403,7 @@ if [[ "$exit_code" -eq 124 ]]; then
     log_error "Subagent run timed out after $TIMEOUT_HUMAN"
 fi
 
-after_tree="$(snapshot_directory_state "$PROJECT_ROOT")"
+after_tree="$(snapshot_directory_state "$SNAPSHOT_ROOT")"
 echo "after_tree=$after_tree" >> "$STATE_OUT"
 
 if [[ "$before_tree" == "$after_tree" ]]; then
@@ -412,10 +416,33 @@ fi
 mkdir -p "$(dirname "$PATCH_OUT")"
 
 log_info "Writing patch (workspace state diff): $PATCH_OUT"
-git -C "$PROJECT_ROOT" diff --binary --no-color "$before_tree" "$after_tree" > "$PATCH_OUT"
+git -C "$SNAPSHOT_ROOT" diff --binary --no-color "$before_tree" "$after_tree" > "$PATCH_OUT"
 
 if [[ ! -s "$PATCH_OUT" ]]; then
     log_warn "Patch is empty. The agent may not have changed any files."
+fi
+
+# Update agent status in database
+if [[ "$exit_code" -eq 0 ]]; then
+    sqlite3 "$DB_FILE" "UPDATE agents SET agent_status='completed' WHERE id=$ROW_ID;"
+else
+    sqlite3 "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=$ROW_ID;"
+fi
+
+# Sandbox cleanup
+if [[ "$USE_SANDBOX" == "true" ]] && [[ -n "$SANDBOX_DIR" ]]; then
+    should_cleanup="false"
+    if [[ "$exit_code" -eq 0 ]] && [[ "$SANDBOX_CLEANUP_ON_SUCCESS" == "true" ]]; then
+        should_cleanup="true"
+    elif [[ "$exit_code" -ne 0 ]] && [[ "$SANDBOX_CLEANUP_ON_FAILURE" == "true" ]]; then
+        should_cleanup="true"
+    fi
+    if [[ "$should_cleanup" == "true" ]]; then
+        log_info "Cleaning up sandbox: $SANDBOX_DIR"
+        "$SCRIPTS_DIR/sandbox-cleanup.sh" "$SANDBOX_DIR" || log_warn "Sandbox cleanup failed"
+    else
+        log_info "Sandbox preserved: $SANDBOX_DIR"
+    fi
 fi
 
 log_info "Done. Patch: $PATCH_OUT"

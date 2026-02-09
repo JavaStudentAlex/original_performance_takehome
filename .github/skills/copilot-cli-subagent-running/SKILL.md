@@ -1,6 +1,6 @@
 # Copilot CLI Subagent Skill (compilers-expert)
 
-This skill defines how to run the repository's **single** Copilot CLI subagents safely and reproducibly via `.github/skills/copilot-cli-subagent-running/run-subagent.sh`.
+This skill defines how to run the repository's **single** Copilot CLI subagents safely and reproducibly via `.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh`.
 
 **Important update:** `run-subagent.sh` now runs the agent directly in the **current workspace** (repo root by default, or `--workdir <path>`) and produces a patch from a **directory-state diff**:
 
@@ -30,10 +30,10 @@ If you just need edits, formatting, or non-compiler work, do **not** spawn the a
 
 ## Hard rules
 
-1. **Always invoke via the wrapper script**: `.github/skills/copilot-cli-subagent-running/run-subagent.sh`  
+1. **Always invoke via the wrapper script**: `.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh`
    Never call the raw `copilot ...` command directly.
-2. **Workspace execution**:  
-   Runs happen in the current workspace. If you need isolation, run from a clean branch or a clean clone.
+2. **Workspace or sandbox execution**:
+   Runs happen in the current workspace by default. Use `--sandbox` for isolation in a git worktree.
 3. **Keep outputs small in terminal/chat**:  
    Redirect full stdout/stderr to `.github/agent-state/` and summarize from the log.
 4. **Ground truth remains ground truth**:  
@@ -78,7 +78,7 @@ The wrapper prints the patch path at the end of the run.
 ts="$(date -u +"%Y%m%dT%H%M%SZ")"
 log=".github/agent-state/subagents/${ts}-compilers-expert.log"
 
-.github/skills/copilot-cli-subagent-running/run-subagent.sh \
+.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh \
   --agent=compilers-expert \
   --prompt "..." \
   >"$log" 2>&1
@@ -89,7 +89,7 @@ echo "log: $log"
 If you want streaming output while logging, use `tee`:
 
 ```bash
-.github/skills/copilot-cli-subagent-running/run-subagent.sh --agent=compilers-expert --prompt "..." 2>&1 \
+.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh --agent=compilers-expert --prompt "..." 2>&1 \
   | tee ".github/agent-state/subagents/${ts}-compilers-expert.log"
 ```
 
@@ -119,7 +119,7 @@ OUTPUT FORMAT:
 For larger context, prefer `--context-file` instead of pasting huge blocks into `--prompt`:
 
 ```bash
-.github/skills/copilot-cli-subagent-running/run-subagent.sh \
+.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh \
   --agent=compilers-expert \
   --context-file STEP.md \
   --prompt "Propose the minimal kernel changes described in STEP.md"
@@ -143,6 +143,37 @@ For larger context, prefer `--context-file` instead of pasting huge blocks into 
 | `--dry-run` | Print command without executing | |
 | `--verbose` | Print debug information | |
 | `--patch-out <path>` | Patch output path | `--patch-out .github/agent-state/patches/run1.patch` |
+| `--sandbox` | Run agent in isolated git worktree | `--sandbox` |
+| `--no-cleanup-on-success` | Keep sandbox after success (default: remove) | `--sandbox --no-cleanup-on-success` |
+| `--cleanup-on-failure` | Remove sandbox even on failure (default: preserve) | `--sandbox --cleanup-on-failure` |
+
+---
+
+## Sandbox mode
+
+Use `--sandbox` to run the agent in an isolated git worktree instead of the main workspace:
+
+```bash
+.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh \
+  --agent=memory-opt-expert \
+  --prompt "Reduce LOAD operations" \
+  --sandbox
+```
+
+**How it works:**
+
+1. `scripts/sandbox-create.sh` creates a git worktree at `.agent-sandboxes/<agent>-<timestamp>/`
+2. Agent runs inside the worktree (main workspace is untouched)
+3. Patch is generated from worktree state diff (same mechanism as non-sandbox mode)
+4. `scripts/sandbox-cleanup.sh` removes the worktree on success (configurable)
+
+The agent is trusted to run its own quality gates inside the sandbox.
+
+**Cleanup policy (default):**
+- Success → sandbox removed
+- Failure → sandbox preserved for debugging at `.agent-sandboxes/<agent>-<timestamp>/`
+
+**Agent tracking:** every run (sandboxed or not) is recorded in `agents.db` at the repo root with columns: `id`, `agent_name`, `agent_path`, `agent_sandbox`, `agent_status`.
 
 ---
 
@@ -151,7 +182,7 @@ For larger context, prefer `--context-file` instead of pasting huge blocks into 
 `run-subagent.sh` has a default model configured internally (`claude-sonnet-4.5`). Override per run if needed:
 
 ```bash
-.github/skills/copilot-cli-subagent-running/run-subagent.sh --agent=compilers-expert --model gpt-5 --prompt "..."
+.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh --agent=compilers-expert --model gpt-5 --prompt "..."
 ```
 
 Availability depends on your Copilot plan / org policy.
@@ -168,7 +199,7 @@ The wrapper runs with broad tool access but **denies destructive commands by def
 Add more restrictions as needed:
 
 ```bash
-.github/skills/copilot-cli-subagent-running/run-subagent.sh \
+.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh \
   --agent=compilers-expert \
   --deny-tool 'shell(curl)' \
   --deny-tool 'shell(wget)' \
@@ -178,7 +209,7 @@ Add more restrictions as needed:
 Allow URLs only when you explicitly need network access:
 
 ```bash
-.github/skills/copilot-cli-subagent-running/run-subagent.sh --agent=compilers-expert --allow-urls --prompt "..."
+.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh --agent=compilers-expert --allow-urls --prompt "..."
 ```
 
 ---
@@ -191,6 +222,41 @@ Copilot CLI resolves custom agents from these locations (highest priority first)
 2. `.github/agents/compilers-expert.agent.md`
 
 Keep the agent description and tool list in the agent profile; keep this file focused on **how to run** the agent safely.
+
+---
+
+## Script architecture
+
+The skill uses a modular script architecture with shared utilities:
+
+### Library files (sourced, not executed directly)
+
+- `scripts/common-utils.sh` - Shared utilities for all scripts:
+  - Logging: `log_verbose`, `log_info`, `log_warn`, `log_error`
+  - Git utilities: `ensure_in_git_repo`
+  - Time utilities: `make_timestamp`, `seconds_to_human`
+  - Validation: `check_copilot_installed`
+  - SQL helpers: `_sql_esc`
+
+- `scripts/snapshot-utils.sh` - Git directory state management:
+  - `snapshot_directory_state` - Creates git tree snapshots for patch generation
+
+### Executable scripts
+
+- `scripts/run-subagent.sh` - Main entry point for running agents
+  - Sources both library files
+  - Orchestrates agent execution, timeout handling, patch generation
+  - Manages database tracking and sandbox lifecycle
+
+- `scripts/sandbox-create.sh` - Creates isolated git worktree
+  - Sources `common-utils.sh` for logging
+  - Creates worktree at `.agent-sandboxes/<agent>-<timestamp>/`
+
+- `scripts/sandbox-cleanup.sh` - Cleans up sandbox worktree
+  - Sources `common-utils.sh` for logging
+  - Removes worktree and associated branch
+
+All executable scripts source the library files for consistent behavior.
 
 ---
 
@@ -242,4 +308,5 @@ Guideline: store the full output in the log, and only a short, high-signal summa
 If this repo's contracts change, update this file to remain consistent with:
 
 - `.github/copilot-instructions.md` (top-level work contract)
-- `run-subagent.sh` (actual wrapper behavior)
+- `scripts/run-subagent.sh` (actual wrapper behavior)
+- `scripts/sandbox-create.sh` / `scripts/sandbox-cleanup.sh` (sandbox lifecycle)

@@ -46,12 +46,14 @@ Skills are reusable instruction sets that agents follow for specific tasks.
 
 ### Coordination Skills
 
-#### copilot-cli-subagent-running
+#### copilot-cli-subagent-running (RECOMMENDED)
 - **Path**: `.github/skills/copilot-cli-subagent-running/SKILL.md`
-- **Purpose**: Invoke agents via Copilot CLI with proper model selection and context packing
-- **Priority**: MANDATORY for all agent invocations
-- **Scope note**: Invocation only — runs Copilot CLI subagents in the current workspace via the wrapper script and produces a patch from a directory-state diff.
+- **Purpose**: Invoke agents via Copilot CLI with proper model selection, context packing, and optional sandbox isolation
+- **Priority**: RECOMMENDED for all agent executions
+- **Scope note**: Runs Copilot CLI subagents in the current workspace (or isolated git worktree with `--sandbox`) via the wrapper script and produces a patch from a directory-state diff. Tracks every run in `agents.db`.
 - **Guardrail notes**: Always ensure `.github/copilot-instructions.md` is loaded before invoking.
+- **Script**: `.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh` (main entry point)
+- **Sandbox helpers**: `scripts/sandbox-create.sh`, `scripts/sandbox-cleanup.sh`
 
 #### task-md-tecc-formatting
 - **Path**: `.github/skills/task-md-tecc-formatting/SKILL.md`
