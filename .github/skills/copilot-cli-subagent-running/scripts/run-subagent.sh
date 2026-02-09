@@ -11,8 +11,8 @@
 #   ./run-subagent.sh --agent=<agent-name> --prompt "<prompt>"
 #
 # Examples:
-#   ./run-subagent.sh --agent=compilers-expert --prompt "Optimize the VLIW bundler"
-#   ./run-subagent.sh --agent=test-expert --workdir ./tests --prompt "Write unit tests"
+#   ./run-subagent.sh --agent=memory-opt-expert --prompt "Reduce LOAD pressure in traversal"
+#   ./run-subagent.sh --agent=docs-expert --workdir .github --prompt "Review workflow docs"
 #   ./run-subagent.sh --agent=planner --context-file STEP.md --prompt "Follow STEP.md"
 #   ./run-subagent.sh --agent=memory-opt-expert --prompt "Optimize" --sandbox
 #
@@ -44,14 +44,21 @@ KILL_AFTER_SECONDS=30
 # Default model (can be overridden)
 DEFAULT_MODEL="claude-sonnet-4.5"
 
-# Default denied tools (safety first)
+# Default denied tools (safety-first, best-effort denylist).
+# Effectiveness depends on Copilot CLI's tool-matching semantics.
+# The sandbox and workflow constraints are the primary safety layers.
 DENIED_TOOLS=(
     "shell(rm)"
     "shell(rm -rf)"
+    "shell(rm -r)"
+    "shell(rm -f)"
     "shell(rmdir)"
+    "shell(/bin/rm)"
+    "shell(/usr/bin/rm)"
     "shell(git push)"
     "shell(git push --force)"
     "shell(git push -f)"
+    "shell(git push --force-with-lease)"
 )
 
 # ==============================================================================
@@ -89,8 +96,8 @@ Output:
     --patch-out <path>          Where to write the patch (default: .github/agent-state/patches/<ts>-<agent>.patch)
 
 Examples:
-    $(basename "$0") --agent=ml-expert --prompt "Implement the loss function"
-    $(basename "$0") --agent=test-expert --model gpt-5 --prompt "Write unit tests"
+    $(basename "$0") --agent=memory-opt-expert --prompt "Reduce LOAD pressure in the hot loop"
+    $(basename "$0") --agent=simd-vect-expert --model gpt-5 --prompt "Vectorize the hash stage"
     $(basename "$0") --agent=planner --workdir ./src --prompt "Analyze this module"
     $(basename "$0") --prompt "Refactor this" --context-file STEP.md
     $(basename "$0") --agent=memory-opt-expert --prompt "Optimize" --sandbox
@@ -227,6 +234,7 @@ fi
 ensure_in_git_repo
 if [[ "$DRY_RUN" != "true" ]]; then
     check_copilot_installed
+    check_sqlite_installed
 fi
 
 if [[ -n "$CONTEXT_FILE" ]] && [[ ! -f "$CONTEXT_FILE" ]]; then
@@ -236,11 +244,18 @@ fi
 
 if [[ -n "$WORKDIR" ]]; then
     # WORKDIR is interpreted relative to repo root.
-    # Absolute paths are not allowed.
+    # Absolute paths and path traversal are not allowed.
     if [[ "$WORKDIR" = /* ]]; then
         log_error "--workdir must be a relative path"
         exit 1
     fi
+    # Reject paths containing ".." to prevent directory traversal
+    case "$WORKDIR" in
+        ..|../*|*/..|*/../*)
+            log_error "--workdir must not contain '..' (path traversal)"
+            exit 1
+            ;;
+    esac
 fi
 
 if [[ "$USE_SANDBOX" == "true" ]]; then
@@ -282,10 +297,15 @@ if [[ "$ALLOW_PATHS" == "true" ]]; then
     CMD+=(--allow-all-paths)
 fi
 
-FULL_PROMPT="$PROMPT"
+CONTRACT_DIRECTIVE="READ FIRST: .github/copilot-instructions.md"
+FULL_PROMPT="$CONTRACT_DIRECTIVE
+
+$PROMPT"
 if [[ -n "$CONTEXT_FILE" ]]; then
     CONTEXT_CONTENT=$(cat "$CONTEXT_FILE")
-    FULL_PROMPT="CONTEXT FROM FILE ($CONTEXT_FILE):
+    FULL_PROMPT="$CONTRACT_DIRECTIVE
+
+CONTEXT FROM FILE ($CONTEXT_FILE):
 ---
 $CONTEXT_CONTENT
 ---
@@ -321,8 +341,21 @@ log_verbose "Working directory: ${WORKDIR:-.}"
 log_verbose "Sandbox mode: $USE_SANDBOX"
 
 if [[ "$DRY_RUN" == "true" ]]; then
-    echo "DRY RUN - Would execute in workspace:" >&2
-    echo "  cd ${WORKDIR:-.} && ${CMD[*]}" >&2
+    WORKDIR_FOR_RUN="${WORKDIR:-.}"
+    if [[ "$WORKDIR_FOR_RUN" == "./" ]]; then
+        WORKDIR_FOR_RUN="."
+    fi
+    echo "DRY RUN - Would execute:" >&2
+    if [[ "$USE_SANDBOX" == "true" ]]; then
+        SANDBOX_WORKDIR="${WORKDIR_FOR_RUN#./}"
+        if [[ "$SANDBOX_WORKDIR" == "." ]]; then
+            echo "  cd <sandbox-root> && ${CMD[*]}" >&2
+        else
+            echo "  cd <sandbox-root>/$SANDBOX_WORKDIR && ${CMD[*]}" >&2
+        fi
+    else
+        echo "  cd $WORKDIR_FOR_RUN && ${CMD[*]}" >&2
+    fi
     echo "  write patch (state diff): $PATCH_OUT" >&2
     [[ "$USE_SANDBOX" == "true" ]] && echo "  sandbox: create worktree, run agent inside it" >&2
     exit 0
@@ -330,7 +363,7 @@ fi
 
 # Initialize SQLite database for agent tracking
 DB_FILE="$PROJECT_ROOT/agents.db"
-sqlite3 "$DB_FILE" "CREATE TABLE IF NOT EXISTS agents (
+db_exec "$DB_FILE" "CREATE TABLE IF NOT EXISTS agents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_name TEXT NOT NULL,
     agent_path TEXT,
@@ -358,9 +391,17 @@ if [[ "$USE_SANDBOX" == "true" ]]; then
 fi
 
 # Record agent run in database
-ROW_ID=$(sqlite3 "$DB_FILE" "INSERT INTO agents (agent_name, agent_path, agent_sandbox, agent_status)
-    VALUES ('$(_sql_esc "$AGENT_FOR_NAMES")', '$(_sql_esc "$AGENT_PATH")', '$(_sql_esc "$SANDBOX_DIR")', 'running');
-    SELECT last_insert_rowid();")
+ROW_ID=$(db_query "$DB_FILE" \
+    "INSERT INTO agents (agent_name, agent_path, agent_sandbox, agent_status)
+     VALUES (?1, ?2, ?3, 'running');
+     SELECT last_insert_rowid();" \
+    "$AGENT_FOR_NAMES" "$AGENT_PATH" "$SANDBOX_DIR")
+
+# Validate ROW_ID is numeric
+if ! [[ "$ROW_ID" =~ ^[0-9]+$ ]]; then
+    log_error "Failed to record agent run in database (got: $ROW_ID)"
+    exit 1
+fi
 log_verbose "Agent run recorded in agents.db (id=$ROW_ID)"
 
 exit_code=0
@@ -373,9 +414,15 @@ if [[ "$USE_SANDBOX" == "true" ]] && [[ -n "$SANDBOX_DIR" ]]; then
 fi
 
 # Snapshot directory state before the run (baseline for patch generation).
+# Note: creates git tree objects that become dangling after the diff.
+# These are cleaned up by periodic `git gc` (automatic on most systems).
 STATE_OUT="$PROJECT_ROOT/.github/agent-state/subagents/${TS}-${AGENT_FOR_NAMES}.workspace-state.txt"
 mkdir -p "$(dirname "$STATE_OUT")"
-before_tree="$(snapshot_directory_state "$SNAPSHOT_ROOT")"
+before_tree="$(snapshot_directory_state "$SNAPSHOT_ROOT")" || {
+    log_error "Failed to snapshot directory state before run"
+    db_exec "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=?1;" "$ROW_ID"
+    exit 1
+}
 {
     echo "base_commit=$base_commit"
     echo "before_tree=$before_tree"
@@ -383,16 +430,20 @@ before_tree="$(snapshot_directory_state "$SNAPSHOT_ROOT")"
 
 # Determine run directory
 run_dir="$SNAPSHOT_ROOT"
-if [[ "$USE_SANDBOX" != "true" ]] && [[ -n "$WORKDIR" ]]; then
-    run_dir="$PROJECT_ROOT/${WORKDIR#./}"
+if [[ -n "$WORKDIR" ]]; then
+    run_dir="$SNAPSHOT_ROOT/${WORKDIR#./}"
     if [[ ! -d "$run_dir" ]]; then
-        log_error "Working directory not found in workspace: $WORKDIR"
-        sqlite3 "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=$ROW_ID;"
+        log_error "Working directory not found: $WORKDIR"
+        db_exec "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=?1;" "$ROW_ID"
         exit 1
     fi
 fi
 
-log_info "Running subagent in workspace..."
+if [[ "$USE_SANDBOX" == "true" ]]; then
+    log_info "Running subagent in sandbox..."
+else
+    log_info "Running subagent in workspace..."
+fi
 log_verbose "Run directory: $run_dir"
 
 pushd "$run_dir" >/dev/null
@@ -403,7 +454,11 @@ if [[ "$exit_code" -eq 124 ]]; then
     log_error "Subagent run timed out after $TIMEOUT_HUMAN"
 fi
 
-after_tree="$(snapshot_directory_state "$SNAPSHOT_ROOT")"
+after_tree="$(snapshot_directory_state "$SNAPSHOT_ROOT")" || {
+    log_error "Failed to snapshot directory state after run"
+    db_exec "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=?1;" "$ROW_ID"
+    exit 1
+}
 echo "after_tree=$after_tree" >> "$STATE_OUT"
 
 if [[ "$before_tree" == "$after_tree" ]]; then
@@ -416,7 +471,10 @@ fi
 mkdir -p "$(dirname "$PATCH_OUT")"
 
 log_info "Writing patch (workspace state diff): $PATCH_OUT"
-git -C "$SNAPSHOT_ROOT" diff --binary --no-color "$before_tree" "$after_tree" > "$PATCH_OUT"
+if ! git -C "$SNAPSHOT_ROOT" diff --binary --no-color "$before_tree" "$after_tree" > "$PATCH_OUT" 2>/dev/null; then
+    log_error "Patch generation failed (git diff returned non-zero). Trees: before=$before_tree after=$after_tree"
+    # Still continue — patch is best-effort, agent status is what matters
+fi
 
 if [[ ! -s "$PATCH_OUT" ]]; then
     log_warn "Patch is empty. The agent may not have changed any files."
@@ -424,9 +482,9 @@ fi
 
 # Update agent status in database
 if [[ "$exit_code" -eq 0 ]]; then
-    sqlite3 "$DB_FILE" "UPDATE agents SET agent_status='completed' WHERE id=$ROW_ID;"
+    db_exec "$DB_FILE" "UPDATE agents SET agent_status='completed' WHERE id=?1;" "$ROW_ID"
 else
-    sqlite3 "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=$ROW_ID;"
+    db_exec "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=?1;" "$ROW_ID"
 fi
 
 # Sandbox cleanup

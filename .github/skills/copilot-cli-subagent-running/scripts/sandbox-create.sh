@@ -16,6 +16,10 @@ SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source shared utilities
 source "$SCRIPTS_DIR/common-utils.sh"
 
+# Safety: redirect stdout to stderr by default, so only explicit
+# machine-readable output goes to the caller's stdout.
+exec 3>&1 1>&2
+
 # ==============================================================================
 # Configuration
 # ==============================================================================
@@ -62,18 +66,16 @@ log_info "Creating sandbox for agent: $AGENT_NAME"
 log_info "Branch: $BRANCH_NAME"
 log_info "Directory: $SANDBOX_DIR"
 
-# Create worktree
-if ! git worktree add "$SANDBOX_DIR" -b "$BRANCH_NAME" "$BASE_REF" >/dev/null 2>&1; then
-    log_error "Failed to create worktree"
+# Create worktree (stdout already redirected to stderr via exec 3>&1 1>&2)
+if ! git worktree add "$SANDBOX_DIR" -b "$BRANCH_NAME" "$BASE_REF" >/dev/null; then
+    log_error "Failed to create worktree at $SANDBOX_DIR (branch=$BRANCH_NAME, base=$BASE_REF)"
     exit 1
 fi
 
-# Output sandbox info (machine-readable format)
-cat <<EOF
-SANDBOX_DIR=$SANDBOX_DIR
-BRANCH_NAME=$BRANCH_NAME
-RUN_ID=$RUN_ID
-AGENT_NAME=$AGENT_NAME
-EOF
+# Machine-readable output — only these lines go to caller's stdout (fd 3)
+echo "SANDBOX_DIR=$SANDBOX_DIR" >&3
+echo "BRANCH_NAME=$BRANCH_NAME" >&3
+echo "RUN_ID=$RUN_ID" >&3
+echo "AGENT_NAME=$AGENT_NAME" >&3
 
 log_info "Sandbox created successfully"

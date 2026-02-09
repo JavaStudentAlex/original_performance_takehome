@@ -1,6 +1,6 @@
-# Copilot CLI Subagent Skill (compilers-expert)
+# Copilot CLI Subagent Runner Skill
 
-This skill defines how to run the repository's **single** Copilot CLI subagents safely and reproducibly via `.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh`.
+This skill defines how to run the repository's Copilot CLI subagents safely and reproducibly via `.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh`.
 
 **Important update:** `run-subagent.sh` now runs the agent directly in the **current workspace** (repo root by default, or `--workdir <path>`) and produces a patch from a **directory-state diff**:
 
@@ -17,14 +17,9 @@ The wrapper also writes a small state file at `.github/agent-state/subagents/<ti
 
 ## When to use this skill
 
-Use `compilers-expert` when you want a focused pass on compiler-style optimization work:
+Use this skill whenever workflow/orchestration needs to run any registered subagent (for example: `planner`, `memory-opt-expert`, `simd-vect-critic`, `project-manager`).
 
-- Static scheduling / bundling for the VLIW target
-- Memory-traffic reduction and latency hiding (loads as the bottleneck)
-- SIMD vectorization / if-conversion guidance
-- Trace-driven debugging and optimization ideas
-
-If you just need edits, formatting, or non-compiler work, do **not** spawn the agent.
+Agent IDs and default models are defined in `.github/prompts/agents.prompt.md`.
 
 ---
 
@@ -40,6 +35,9 @@ If you just need edits, formatting, or non-compiler work, do **not** spawn the a
    Tests and reference behavior are authoritative; don't change them unless explicitly requested.
 5. **Reference, don't duplicate**:  
    Point the agent to `.github/copilot-instructions.md` and `VLIW.md` instead of restating theory.
+6. **Include repo contract in context pack**:
+   Ensure `.github/copilot-instructions.md` is included via `--context-file` or explicit prompt directive.
+   The wrapper also prepends `READ FIRST: .github/copilot-instructions.md` to every run.
 
 **Workspace snapshot invariants (non-negotiable):**
 
@@ -76,10 +74,11 @@ The wrapper prints the patch path at the end of the run.
 
 ```bash
 ts="$(date -u +"%Y%m%dT%H%M%SZ")"
-log=".github/agent-state/subagents/${ts}-compilers-expert.log"
+agent="memory-opt-expert"
+log=".github/agent-state/subagents/${ts}-${agent}.log"
 
 .github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh \
-  --agent=compilers-expert \
+  --agent="$agent" \
   --prompt "..." \
   >"$log" 2>&1
 
@@ -89,8 +88,8 @@ echo "log: $log"
 If you want streaming output while logging, use `tee`:
 
 ```bash
-.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh --agent=compilers-expert --prompt "..." 2>&1 \
-  | tee ".github/agent-state/subagents/${ts}-compilers-expert.log"
+.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh --agent=memory-opt-expert --prompt "..." 2>&1 \
+  | tee ".github/agent-state/subagents/${ts}-memory-opt-expert.log"
 ```
 
 ---
@@ -120,7 +119,7 @@ For larger context, prefer `--context-file` instead of pasting huge blocks into 
 
 ```bash
 .github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh \
-  --agent=compilers-expert \
+  --agent=planner \
   --context-file STEP.md \
   --prompt "Propose the minimal kernel changes described in STEP.md"
 ```
@@ -132,9 +131,9 @@ For larger context, prefer `--context-file` instead of pasting huge blocks into 
 | Flag | Purpose | Example |
 |------|---------|---------|
 | `--prompt <text>` | Task for the agent (required) | `--prompt "Optimize the hash loop"` |
-| `--agent <name>` | Custom agent name | `--agent=compilers-expert` |
+| `--agent <name>` | Custom agent name | `--agent=memory-opt-expert` |
 | `--model <model>` | AI model override | `--model claude-sonnet-4` |
-| `--workdir <path>` | Working directory inside the repo | `--workdir ./src` |
+| `--workdir <path>` | Working directory inside the repo (and sandbox when enabled) | `--workdir ./src` |
 | `--context-file <file>` | Prepend file contents to prompt | `--context-file STEP.md` |
 | `--allow-tool <tool>` | Allow additional tool (repeatable) | `--allow-tool 'shell(npm run test:*)'` |
 | `--deny-tool <tool>` | Deny additional tool (repeatable) | `--deny-tool 'shell(docker)'` |
@@ -164,6 +163,7 @@ Use `--sandbox` to run the agent in an isolated git worktree instead of the main
 
 1. `scripts/sandbox-create.sh` creates a git worktree at `.agent-sandboxes/<agent>-<timestamp>/`
 2. Agent runs inside the worktree (main workspace is untouched)
+   - If `--workdir` is provided, it is resolved relative to the sandbox root.
 3. Patch is generated from worktree state diff (same mechanism as non-sandbox mode)
 4. `scripts/sandbox-cleanup.sh` removes the worktree on success (configurable)
 
@@ -182,7 +182,7 @@ The agent is trusted to run its own quality gates inside the sandbox.
 `run-subagent.sh` has a default model configured internally (`claude-sonnet-4.5`). Override per run if needed:
 
 ```bash
-.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh --agent=compilers-expert --model gpt-5 --prompt "..."
+.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh --agent=planner --model gpt-5 --prompt "..."
 ```
 
 Availability depends on your Copilot plan / org policy.
@@ -200,7 +200,7 @@ Add more restrictions as needed:
 
 ```bash
 .github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh \
-  --agent=compilers-expert \
+  --agent=memory-opt-expert \
   --deny-tool 'shell(curl)' \
   --deny-tool 'shell(wget)' \
   --prompt "..."
@@ -209,7 +209,7 @@ Add more restrictions as needed:
 Allow URLs only when you explicitly need network access:
 
 ```bash
-.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh --agent=compilers-expert --allow-urls --prompt "..."
+.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh --agent=memory-opt-expert --allow-urls --prompt "..."
 ```
 
 ---
@@ -218,8 +218,8 @@ Allow URLs only when you explicitly need network access:
 
 Copilot CLI resolves custom agents from these locations (highest priority first):
 
-1. `~/.copilot/agents/compilers-expert.agent.md`
-2. `.github/agents/compilers-expert.agent.md`
+1. `~/.copilot/agents/<agent-id>.agent.md`
+2. `.github/agents/<agent-id>.agent.md`
 
 Keep the agent description and tool list in the agent profile; keep this file focused on **how to run** the agent safely.
 
@@ -235,7 +235,7 @@ The skill uses a modular script architecture with shared utilities:
   - Logging: `log_verbose`, `log_info`, `log_warn`, `log_error`
   - Git utilities: `ensure_in_git_repo`
   - Time utilities: `make_timestamp`, `seconds_to_human`
-  - Validation: `check_copilot_installed`
+  - Validation: `check_copilot_installed`, `check_sqlite_installed`
   - SQL helpers: `_sql_esc`
 
 - `scripts/snapshot-utils.sh` - Git directory state management:
@@ -264,7 +264,7 @@ All executable scripts source the library files for consistent behavior.
 
 Use `.github/agent-state/` as the audit trail:
 
-- Raw subagent logs: `.github/agent-state/subagents/<timestamp>-compilers-expert.log`
+- Raw subagent logs: `.github/agent-state/subagents/<timestamp>-<agent>.log`
 - Workspace state files: `.github/agent-state/subagents/<timestamp>-<agent>.workspace-state.txt`
 - Patches: `.github/agent-state/patches/<timestamp>-<agent>.patch`
 - Optional short summaries: `.github/agent-state/NOTES.md`
@@ -287,6 +287,7 @@ Guideline: store the full output in the log, and only a short, high-signal summa
 | Error | Cause | Solution |
 |-------|-------|----------|
 | `GitHub Copilot CLI is not installed` | CLI missing | Install and ensure `copilot` is on PATH |
+| `sqlite3 is required for agent run tracking` | `sqlite3` missing | Install sqlite3 and rerun |
 | `Authentication failed` | Token/auth issue | Re-authenticate with `gh auth login` |
 | `Tool denied` | Missing permission | Add `--allow-tool ...` or adjust deny patterns |
 | `124` exit code | Timeout | Reduce scope or split the task |

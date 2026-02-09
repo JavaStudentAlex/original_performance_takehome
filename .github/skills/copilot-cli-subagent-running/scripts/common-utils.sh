@@ -70,11 +70,65 @@ check_copilot_installed() {
     fi
 }
 
+check_sqlite_installed() {
+    if ! command -v sqlite3 &> /dev/null; then
+        log_error "sqlite3 is required for agent run tracking but is not installed."
+        exit 1
+    fi
+}
+
 # ==============================================================================
 # SQL Utilities
 # ==============================================================================
 
-# Helper for SQL-safe single-quote escaping
-_sql_esc() {
-    printf '%s' "$1" | sed "s/'/''/g"
+# Escape a value for use inside double-quoted sqlite3 .param set.
+# Escapes backslashes and double-quotes so the value survives sqlite3 parsing.
+# Values with embedded newlines are rejected (not expected in our data model).
+_param_esc() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# Run a SQL statement against the agent-tracking database.
+# Uses .timeout (5s) to handle concurrent access.
+# Usage: db_exec <db_file> <sql> [args...]
+#   - Use ?1, ?2, ... placeholders in SQL
+#   - Pass corresponding values as positional args
+db_exec() {
+    local db_file="$1"; shift
+    local sql="$1"; shift
+
+    local param_cmds=""
+    local i=1
+    for val in "$@"; do
+        param_cmds="${param_cmds}.param set ?${i} \"$(_param_esc "$val")\"
+"
+        i=$((i + 1))
+    done
+
+    sqlite3 "$db_file" <<EOF
+.timeout 5000
+.param init
+${param_cmds}${sql}
+EOF
+}
+
+# Variant that returns query output (e.g., INSERT...SELECT).
+# Same interface as db_exec.
+db_query() {
+    local db_file="$1"; shift
+    local sql="$1"; shift
+
+    local param_cmds=""
+    local i=1
+    for val in "$@"; do
+        param_cmds="${param_cmds}.param set ?${i} \"$(_param_esc "$val")\"
+"
+        i=$((i + 1))
+    done
+
+    sqlite3 "$db_file" <<EOF
+.timeout 5000
+.param init
+${param_cmds}${sql}
+EOF
 }
