@@ -210,6 +210,20 @@ USE_SANDBOX="false"
 SANDBOX_CLEANUP_ON_SUCCESS="true"
 SANDBOX_CLEANUP_ON_FAILURE="false"
 PRUNE_STALE="false"
+SAW_PROMPT_FLAG="false"
+SAW_AGENT_FLAG="false"
+SAW_MODEL_FLAG="false"
+SAW_WORKDIR_FLAG="false"
+SAW_CONTEXT_FILE_FLAG="false"
+SAW_DENY_TOOL_FLAG="false"
+SAW_ALLOW_URLS_FLAG="false"
+SAW_ALLOW_PATHS_FLAG="false"
+SAW_DRY_RUN_FLAG="false"
+SAW_PATCH_OUT_FLAG="false"
+SAW_MAX_INLINE_CONTEXT_BYTES_FLAG="false"
+SAW_SANDBOX_FLAG="false"
+SAW_NO_CLEANUP_ON_SUCCESS_FLAG="false"
+SAW_CLEANUP_ON_FAILURE_FLAG="false"
 
 require_value() {
     local opt="$1"
@@ -233,57 +247,79 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --prompt)
             require_value "--prompt" "$#" "${2:-}"
+            SAW_PROMPT_FLAG="true"
             PROMPT="$2"; shift 2 ;;
         --prompt=*)
+            SAW_PROMPT_FLAG="true"
             PROMPT="${1#*=}"; shift ;;
         --agent)
             require_value "--agent" "$#" "${2:-}"
+            SAW_AGENT_FLAG="true"
             AGENT="$2"; shift 2 ;;
         --agent=*)
+            SAW_AGENT_FLAG="true"
             AGENT="${1#*=}"; shift ;;
         --model)
             require_value "--model" "$#" "${2:-}"
+            SAW_MODEL_FLAG="true"
             MODEL="$2"; shift 2 ;;
         --model=*)
+            SAW_MODEL_FLAG="true"
             MODEL="${1#*=}"; shift ;;
         --workdir)
             require_value "--workdir" "$#" "${2:-}"
+            SAW_WORKDIR_FLAG="true"
             WORKDIR="$2"; shift 2 ;;
         --workdir=*)
+            SAW_WORKDIR_FLAG="true"
             WORKDIR="${1#*=}"; shift ;;
         --context-file)
             require_value "--context-file" "$#" "${2:-}"
+            SAW_CONTEXT_FILE_FLAG="true"
             CONTEXT_FILE="$2"; shift 2 ;;
         --context-file=*)
+            SAW_CONTEXT_FILE_FLAG="true"
             CONTEXT_FILE="${1#*=}"; shift ;;
         --deny-tool)
             require_value "--deny-tool" "$#" "${2:-}"
+            SAW_DENY_TOOL_FLAG="true"
             EXTRA_DENY_TOOLS+=("$2"); shift 2 ;;
         --deny-tool=*)
+            SAW_DENY_TOOL_FLAG="true"
             EXTRA_DENY_TOOLS+=("${1#*=}"); shift ;;
         --allow-urls)
+            SAW_ALLOW_URLS_FLAG="true"
             ALLOW_URLS="true"; shift ;;
         --allow-paths)
+            SAW_ALLOW_PATHS_FLAG="true"
             ALLOW_PATHS="true"; shift ;;
         --dry-run)
+            SAW_DRY_RUN_FLAG="true"
             DRY_RUN="true"; shift ;;
         --verbose)
             VERBOSE="true"; shift ;;
         --patch-out)
             require_value "--patch-out" "$#" "${2:-}"
+            SAW_PATCH_OUT_FLAG="true"
             PATCH_OUT="$2"; shift 2 ;;
         --patch-out=*)
+            SAW_PATCH_OUT_FLAG="true"
             PATCH_OUT="${1#*=}"; shift ;;
         --max-inline-context-bytes)
             require_value "--max-inline-context-bytes" "$#" "${2:-}"
+            SAW_MAX_INLINE_CONTEXT_BYTES_FLAG="true"
             MAX_INLINE_CONTEXT_BYTES="$2"; shift 2 ;;
         --max-inline-context-bytes=*)
+            SAW_MAX_INLINE_CONTEXT_BYTES_FLAG="true"
             MAX_INLINE_CONTEXT_BYTES="${1#*=}"; shift ;;
         --sandbox)
+            SAW_SANDBOX_FLAG="true"
             USE_SANDBOX="true"; shift ;;
         --no-cleanup-on-success)
+            SAW_NO_CLEANUP_ON_SUCCESS_FLAG="true"
             SANDBOX_CLEANUP_ON_SUCCESS="false"; shift ;;
         --cleanup-on-failure)
+            SAW_CLEANUP_ON_FAILURE_FLAG="true"
             SANDBOX_CLEANUP_ON_FAILURE="true"; shift ;;
         --prune-stale)
             PRUNE_STALE="true"; shift ;;
@@ -314,11 +350,13 @@ ensure_in_git_repo
 # P07: Wrapper-owned prune mode.
 # Must run without --prompt and cannot be mixed with run options.
 if [[ "$PRUNE_STALE" == "true" ]]; then
-    if [[ -n "$PROMPT" ]] || [[ -n "$AGENT" ]] || [[ "$MODEL" != "$DEFAULT_MODEL" ]] || \
-       [[ -n "$WORKDIR" ]] || [[ -n "$CONTEXT_FILE" ]] || [[ ${#EXTRA_DENY_TOOLS[@]} -gt 0 ]] || \
-       [[ "$ALLOW_URLS" == "true" ]] || [[ "$ALLOW_PATHS" == "true" ]] || [[ "$DRY_RUN" == "true" ]] || \
-       [[ -n "$PATCH_OUT" ]] || [[ "$MAX_INLINE_CONTEXT_BYTES" != "65536" ]] || [[ "$USE_SANDBOX" == "true" ]] || \
-       [[ "$SANDBOX_CLEANUP_ON_SUCCESS" != "true" ]] || [[ "$SANDBOX_CLEANUP_ON_FAILURE" != "false" ]]; then
+    if [[ "$SAW_PROMPT_FLAG" == "true" ]] || [[ "$SAW_AGENT_FLAG" == "true" ]] || \
+       [[ "$SAW_MODEL_FLAG" == "true" ]] || [[ "$SAW_WORKDIR_FLAG" == "true" ]] || \
+       [[ "$SAW_CONTEXT_FILE_FLAG" == "true" ]] || [[ "$SAW_DENY_TOOL_FLAG" == "true" ]] || \
+       [[ "$SAW_ALLOW_URLS_FLAG" == "true" ]] || [[ "$SAW_ALLOW_PATHS_FLAG" == "true" ]] || \
+       [[ "$SAW_DRY_RUN_FLAG" == "true" ]] || [[ "$SAW_PATCH_OUT_FLAG" == "true" ]] || \
+       [[ "$SAW_MAX_INLINE_CONTEXT_BYTES_FLAG" == "true" ]] || [[ "$SAW_SANDBOX_FLAG" == "true" ]] || \
+       [[ "$SAW_NO_CLEANUP_ON_SUCCESS_FLAG" == "true" ]] || [[ "$SAW_CLEANUP_ON_FAILURE_FLAG" == "true" ]]; then
         log_error "--prune-stale cannot be combined with run options"
         print_usage
         exit 1
