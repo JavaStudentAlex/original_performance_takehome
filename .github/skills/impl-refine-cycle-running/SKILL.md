@@ -1,6 +1,6 @@
 ---
 name: impl-refine-cycle-running
-description: Single-pass implementation loop runner: invoke implementer and critic, record deterministic per-cycle artifacts under `.github/agent-state/cycles/<STEP_ID>/`, select the correct patch source, and enforce "no patch on HARD_FAIL" before stopping after one cycle.
+description: Single-pass implementation loop runner: invoke implementer and critic, require change-by-change review coverage, record deterministic per-cycle artifacts under `.github/agent-state/cycles/<STEP_ID>/`, select patch source, and enforce "no patch on HARD_FAIL" before stopping after one cycle.
 ---
 
 # Skill: impl-refine-cycle-running
@@ -14,7 +14,7 @@ Run a single implementation refinement cycle (implementer pass, critic pass, pat
 This skill orchestrates **one forward pass** of an implementation refinement cycle:
 
 1. **Implementer pass** - A service agent applies changes in an isolated workspace and commits them
-2. **Critic pass** - A reviewer evaluates the result and renders a verdict
+2. **Critic pass** - A reviewer evaluates the result and must review every implementer change
 3. **Patch decision** - Apply changes to main workspace or keep artifacts for debugging
 
 This skill is a reusable unit. It does not define agent rosters, model assignments, or multi-cycle loops. Those are the caller's responsibility.
@@ -88,6 +88,11 @@ Persist output as `cycle-<NN>-service.md` using the SERVICE_RESULT template.
 Invoke the critic using `.github/skills/copilot-cli-subagent-running/SKILL.md`.
 
 **Default behavior:** Critic reviews and produces findings plus verdict, without edits.
+
+**Change-by-change review coverage is mandatory:**
+- Critic must review every changed file and key symbol listed in `cycle-<NN>-service.md` under `Changes`
+- Critic must populate `Change Review Coverage` in `cycle-<NN>-critic.md` with one entry per changed item
+- Missing coverage for any changed item must be treated as `HARD_FAIL`
 
 **If `CRITIC_CAN_EDIT=true`:** Caller permits minimal fixes. Edits must be:
 - Minimal and scoped to blockers
@@ -187,6 +192,10 @@ File: `cycle-<NN>-critic.md`
 
 <Does the result match MICRO_TASK and DoD?>
 
+## Change Review Coverage (mandatory)
+
+- <changed path/symbol> - <APPROVE | ISSUE> - <value/risk rationale>
+
 ## Blockers
 
 <location> - <issue> - <minimal fix guidance>
@@ -217,6 +226,8 @@ File: `cycle-<NN>-critic.md`
 3. **Scope discipline** - Keep diffs small and step-scoped; avoid refactor drift
 4. **Conflict handling** - If patch application conflicts, keep the patch and any underlying logs/diffs and surface details to the caller
 5. **Single pass** - This skill runs exactly one cycle; looping is out of scope
+6. **Critic pass is mandatory** - Every cycle must include critic output before patch decision
+7. **Review coverage is mandatory** - Every changed file/symbol from SERVICE_RESULT must appear in `Change Review Coverage`
 
 ---
 

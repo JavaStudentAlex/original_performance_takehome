@@ -129,7 +129,8 @@ The caller must supply or derive a run configuration.
 
 **PHASE_LIMITS structure:**
 - `MAX_PLAN_REFINEMENTS`: integer (default: 3)
-- `MAX_CYCLES_PER_STEP`: integer (default: 5)
+- `MAX_CYCLES_PER_STEP`: integer or `unbounded` (default: 5)
+- `MAX_NO_PROGRESS_CYCLES`: integer (default: 3)
 
 ### Recommended Inputs
 
@@ -137,6 +138,7 @@ The caller must supply or derive a run configuration.
 |-------|------|-------------|
 | `RESTART_POLICY` | object | When and where to restart on failure |
 | `STEP_EXECUTION_POLICY` | object | How to sequence steps |
+| `LONG_RUNNING_MODE` | boolean | If true, keep repeating implementation cycles until a step gate passes or safety stop is hit |
 | `QUALITY_GATES` | pointer | Commands/criteria that must pass |
 
 **RESTART_POLICY structure:**
@@ -146,6 +148,8 @@ The caller must supply or derive a run configuration.
 **STEP_EXECUTION_POLICY structure:**
 - `order`: `sequential` (default) or `dependency-aware`
 - `stop_on_first_hard_fail`: boolean (default: true)
+- `accept_soft_fail`: boolean (default: false)
+- `carry_forward_context`: boolean (default: true)
 
 ---
 
@@ -209,7 +213,7 @@ The caller must supply or derive a run configuration.
 
 ### Phase B: Implementation (Step-wise)
 
-**Goal:** Execute each plan step with iterative implementer+critic refinement.
+**Goal:** Execute each plan step with iterative implementer+critic refinement and mandatory review on every cycle.
 
 **Procedure for each step in `PLAN.md`:**
 
@@ -220,10 +224,13 @@ The caller must supply or derive a run configuration.
 2. **Run refinement cycles (loop)**
    - Use `.github/skills/impl-refine-cycle-running/SKILL.md`
    - Provide: step ID, cycle number, microtask, DoD, implementer/critic identifiers, prior critique
+   - Carry forward context from the previous cycle (`cycle-<NN>-service.md`, `cycle-<NN>-critic.md`, unresolved blockers)
+   - Require critic `Change Review Coverage` for every cycle before any step-accept decision
 
 3. **Stop step loop when:**
-   - Verdict is `PASS` or `SOFT_FAIL` (step accepted), OR
-   - `MAX_CYCLES_PER_STEP` reached, OR
+   - Step gate passes (DoD satisfied, required checks pass, critic verdict is `PASS`, review coverage complete), OR
+   - `MAX_CYCLES_PER_STEP` reached (when finite), OR
+   - `MAX_NO_PROGRESS_CYCLES` reached, OR
    - `HARD_FAIL` returned and policy says stop
 
 4. **Record step outcome**
@@ -232,7 +239,8 @@ The caller must supply or derive a run configuration.
 
 **Step Gate (per step):**
 - DoD satisfied (as stated in `PLAN.md` / `STEP.md`)
-- Evidence recorded (commands run, outputs, pass/fail)
+- Required checks recorded with evidence (commands run, outputs, pass/fail)
+- Critic review coverage complete for all changed files/symbols in the latest cycle
 - Outcome recorded in `STEP.md`
 
 **Failure Handling:**
@@ -240,8 +248,10 @@ The caller must supply or derive a run configuration.
 | Verdict | Action |
 |---------|--------|
 | `PASS` | Step accepted; proceed to next step |
-| `SOFT_FAIL` | Step accepted unless policy requires nit fixes |
+| `SOFT_FAIL` | Continue next cycle by default; carry critic findings forward |
 | `HARD_FAIL` | Stop; determine restart boundary |
+
+If `accept_soft_fail=true`, caller may accept `SOFT_FAIL` only when DoD and required checks are already satisfied.
 
 **HARD_FAIL classification:**
 
@@ -252,6 +262,21 @@ The caller must supply or derive a run configuration.
 | Unclear intent / shifting requirements | Phase 0 |
 
 Preserve evidence (cycle outputs, step notes) for next run, but treat as non-authoritative until revalidated.
+
+### Long-running Step Loop (Self-Repeating)
+
+When `LONG_RUNNING_MODE=true`, run Phase B as a persistent loop per step:
+
+1. Execute one implementer+critic cycle via `impl-refine-cycle-running`
+2. Run required checks and evaluate progress (DoD delta, blocker count, test outcomes)
+3. If step gate is not met, start the next cycle with carried context
+4. Stop only on:
+   - Step gate pass
+   - `MAX_CYCLES_PER_STEP` (if finite)
+   - `MAX_NO_PROGRESS_CYCLES`
+   - Explicit `HARD_FAIL` restart decision
+
+This mode is long-running, but not an uncontrolled infinite loop; progress-based safety stops are mandatory.
 
 ---
 
@@ -285,6 +310,7 @@ A restart is a **new global cycle run** with a new `RUN_ID`, retaining prior art
 | Evidence insufficient or wrong | A (Plan research) | Need more investigation/planning evidence |
 | Plan not implementable | A (Plan research) | Decomposition needs revision |
 | Implementation blocked, plan OK | B (Implementation) | Retry with same plan |
+| No measurable progress for `MAX_NO_PROGRESS_CYCLES` | A or B | Re-plan if decomposition is weak; otherwise continue from implementation |
 
 ### Restart Procedure
 
@@ -324,7 +350,7 @@ Before treating a global cycle as complete, verify:
 
 - [ ] Phase 0 gate passed: `TASK.md` has all TECC sections, observable outcomes
 - [ ] Phase A gate passed: `PLAN.md` includes research evidence plus executable steps with scope and DoD
-- [ ] Phase B gate passed: All steps have Status = `DONE`, evidence recorded
+- [ ] Phase B gate passed: All steps have Status = `DONE`, evidence recorded, and critic review coverage present for each cycle
 - [ ] Phase C gate passed: `REPORT.md` documents verification with commands and results
 - [ ] All quality gates from `TASK.md` Constraints are satisfied
 - [ ] No artifacts contain `(missing)` without documented mitigation
@@ -338,7 +364,7 @@ Before treating a global cycle as complete, verify:
 |---------|---------|-----|
 | Skipping deep research in planning | Plan based on assumptions, not evidence | Require research evidence in `PLAN.md` before steps |
 | Vague DoD in plan | Cannot verify step completion | Ensure DoD is observable and testable |
-| Ignoring SOFT_FAIL nits | Tech debt accumulates | Track nits for follow-up or fix before proceeding |
+| Treating `SOFT_FAIL` as complete by default | Incomplete work gets accepted | Keep looping unless `accept_soft_fail=true` and gates are already satisfied |
 | Restarting without new RUN_ID | Confusion about which run's artifacts are current | Always create new RUN_ID on restart |
 | No evidence in report | Claims without proof | Include commands run and their outputs |
 | Mixing phase responsibilities | Artifacts modified by wrong phase | Respect artifact ownership strictly |
@@ -355,6 +381,7 @@ TASK_SOURCE: "Add unit tests for the parser module"
 PHASE_LIMITS:
   MAX_PLAN_REFINEMENTS: 3
   MAX_CYCLES_PER_STEP: 5
+  MAX_NO_PROGRESS_CYCLES: 3
 ```
 
 ### Full Configuration
@@ -364,7 +391,8 @@ RUN_ID: "run-2025-01-21-002"
 TASK_SOURCE: "Implement batch processing for DataLoader to reduce memory usage"
 PHASE_LIMITS:
   MAX_PLAN_REFINEMENTS: 3
-  MAX_CYCLES_PER_STEP: 5
+  MAX_CYCLES_PER_STEP: unbounded
+  MAX_NO_PROGRESS_CYCLES: 3
 RESTART_POLICY:
   restart_from: PLAN
   restart_on:
@@ -373,6 +401,9 @@ RESTART_POLICY:
 STEP_EXECUTION_POLICY:
   order: sequential
   stop_on_first_hard_fail: true
+  accept_soft_fail: false
+  carry_forward_context: true
+LONG_RUNNING_MODE: true
 QUALITY_GATES:
   - "python -m pytest tests/"
   - "pre-commit run --all-files"

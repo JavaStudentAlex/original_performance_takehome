@@ -194,7 +194,7 @@ When work cannot proceed:
 A step may only be marked DONE when ALL of these are true:
 
 - Cycles completed >= Minimum refinement cycles
-- Latest Verdict is `PASS` (or `SOFT_FAIL` with no DoD issues)
+- Latest Verdict is `PASS`
 - All Definition of Done criteria are satisfied
 - All quality gates have passed
 

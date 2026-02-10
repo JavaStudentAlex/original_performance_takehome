@@ -45,6 +45,18 @@ Agent IDs and default models are defined in `.github/prompts/agents.prompt.md`.
 
 ---
 
+## Session Continuity Model
+
+This wrapper is **stateless per invocation**:
+
+- Each run is a one-shot `copilot ... -p "<prompt>"` execution
+- The wrapper does not provide a chat/session resume identifier
+- Long-running workflows must persist memory in artifacts (`STEP.md`, `cycle-<NN>-service.md`, `cycle-<NN>-critic.md`) and pass them back through `--context-file` or prompt references on the next run
+
+For repeat-until-done loops, treat artifact carry-forward as the canonical memory mechanism.
+
+---
+
 ## Prerequisites
 
 1. **GitHub Copilot Subscription**: Pro, Pro+, Business, or Enterprise
@@ -126,9 +138,25 @@ For larger context, prefer `--context-file` instead of pasting huge blocks into 
 
 **Context-file path semantics:**
 - Relative paths are resolved from the **repo root** (not the caller's CWD).
-- Absolute paths must be inside the repo root.
+- Absolute paths are allowed only when they resolve inside the repo root.
 - Path traversal (`..`) is rejected.
+- Symlinks are allowed only if the fully resolved target remains inside the repo root.
 - Files larger than `--max-inline-context-bytes` (default 65536) are **not** inlined into the prompt. Instead, the wrapper injects a file-read directive telling the agent to read the file using its tools. This avoids `ARG_MAX` failures with very large context files.
+
+**Context-file containment verification:**
+
+These cases document the expected behavior and can be used for manual regression checks:
+
+| Case | Input | Expected |
+|------|-------|----------|
+| Relative path inside repo | `--context-file STEP.md` | Accepted (resolved from repo root) |
+| Absolute path inside repo | `--context-file /abs/path/to/repo/STEP.md` | Accepted |
+| Path traversal (`..`) | `--context-file ../outside.md` | Rejected (path traversal) |
+| Symlink to file inside repo | `--context-file link-to-step.md` (symlink -> STEP.md) | Accepted |
+| Symlink escaping repo root | `--context-file link-to-etc.md` (symlink -> /etc/passwd) | Rejected (symlink escape blocked) |
+| Deeply nested symlink chain | `--context-file a -> b -> c -> ... -> target` (> 40 hops) | Rejected (loop protection) |
+| Non-existent file | `--context-file no-such-file.md` | Rejected (file not found) |
+| Directory (not file) | `--context-file src/` | Rejected (must be regular file) |
 
 ---
 
@@ -136,16 +164,13 @@ For larger context, prefer `--context-file` instead of pasting huge blocks into 
 
 | Flag | Purpose | Example |
 |------|---------|---------|
-| `--prompt <text>` | Task for the agent (required) | `--prompt "Optimize the hash loop"` |
+| `--prompt <text>` | Task for the agent (required unless using `--prune-stale`) | `--prompt "Optimize the hash loop"` |
 | `--agent <name>` | Custom agent name (must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`) | `--agent=memory-opt-expert` |
 | `--model <model>` | AI model override | `--model claude-sonnet-4` |
 | `--workdir <path>` | Working directory inside the repo (and sandbox when enabled) | `--workdir ./src` |
 | `--context-file <file>` | Prepend file contents to prompt (resolved from repo root) | `--context-file STEP.md` |
 | `--max-inline-context-bytes <N>` | Max context file size to inline in prompt (default: 65536). Larger files use file-reference mode. | `--max-inline-context-bytes 131072` |
-| `--tool-policy <policy>` | Tool permission policy: `allowlist` (default) or `legacy-denylist` | `--tool-policy=legacy-denylist` |
-| `--allow-all-tools-unsafe` | Shortcut for `--tool-policy=legacy-denylist` (restores old behavior) | |
-| `--allow-tool <tool>` | Additional tool to allow (repeatable, merged with policy) | `--allow-tool 'shell(npm run test:*)'` |
-| `--deny-tool <tool>` | Deny additional tool (repeatable, applied in all policies) | `--deny-tool 'shell(docker)'` |
+| `--deny-tool <tool>` | Deny additional tool (repeatable) | `--deny-tool 'shell(docker)'` |
 | `--allow-urls` | Allow network access | |
 | `--allow-paths` | Allow all path access | |
 | `--dry-run` | Print command without executing | |
@@ -154,6 +179,7 @@ For larger context, prefer `--context-file` instead of pasting huge blocks into 
 | `--sandbox` | Run agent in isolated git worktree | `--sandbox` |
 | `--no-cleanup-on-success` | Keep sandbox after success (default: remove) | `--sandbox --no-cleanup-on-success` |
 | `--cleanup-on-failure` | Remove sandbox even on failure (default: preserve) | `--sandbox --cleanup-on-failure` |
+| `--prune-stale` | Prune orphaned sandbox worktrees (wrapper-owned maintenance mode; cannot be combined with run options) | `--prune-stale` |
 
 ---
 
@@ -181,6 +207,13 @@ The agent is trusted to run its own quality gates inside the sandbox.
 **Cleanup policy (default):**
 - Success → sandbox removed
 - Failure → sandbox preserved for debugging at `.agent-sandboxes/<agent>-<timestamp>/`
+- Prune mode safety: `run-subagent.sh --prune-stale` delegates to cleanup helpers that never traverse symlinks and refuse out-of-base deletions.
+
+Use wrapper-owned prune mode:
+
+```bash
+.github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh --prune-stale
+```
 
 **Agent tracking:** every run (sandboxed or not) is recorded in `agents.db` at the repo root with columns: `id`, `agent_name`, `agent_path`, `agent_sandbox`, `agent_status`.
 
@@ -207,23 +240,13 @@ Availability depends on your Copilot plan / org policy.
 
 ## Tool permissions and safety
 
-The wrapper uses an **allowlist-based tool policy** by default. Only a conservative set of tools is allowed unless the agent definition specifies its own tool list.
+The wrapper uses **allow-all + denylist** mode. All tools are allowed by default; a static set of destructive commands is always denied:
 
-**Default policy: `allowlist`**
+- `shell(rm)`, `shell(rm -rf)`, `shell(rm -r)`, `shell(rm -f)`, `shell(rmdir)`
+- `shell(/bin/rm)`, `shell(/usr/bin/rm)`
+- `shell(git push)`, `shell(git push --force)`, `shell(git push -f)`, `shell(git push --force-with-lease)`
 
-The wrapper builds the allowed tool set from:
-1. The agent's definition file (`~/.copilot/agents/<agent>.agent.md` or `.github/agents/<agent>.agent.md`), if it contains a tools block.
-2. If no agent-specific tools are found, a conservative fallback set: `read`, `search`, `execute`, `edit`, `agent`, `todo`, `web`, `vscode`.
-
-Destructive commands are always denied as defense-in-depth:
-- `shell(rm)`, `shell(rm -rf)`, `shell(rmdir)`
-- `shell(git push)`, `shell(git push --force)`, `shell(git push -f)`
-
-**Effective tool set:** `(policy_allowlist + --allow-tool flags) - (default_denies + --deny-tool flags)`
-
-**Legacy mode:** Use `--tool-policy=legacy-denylist` or `--allow-all-tools-unsafe` to restore the previous behavior (allow all tools, deny destructive ones only). This is an explicit opt-in for backward compatibility.
-
-Add more restrictions as needed:
+Additional denials can be added per invocation with `--deny-tool`:
 
 ```bash
 .github/skills/copilot-cli-subagent-running/scripts/run-subagent.sh \
@@ -232,6 +255,10 @@ Add more restrictions as needed:
   --deny-tool 'shell(wget)' \
   --prompt "..."
 ```
+
+**Effective tool set:** `all_tools - (static_denies + --deny-tool flags)`
+
+The denylist is best-effort defense-in-depth. Sandbox isolation and workflow constraints are the primary safety layers.
 
 Allow URLs only when you explicitly need network access:
 
@@ -298,6 +325,15 @@ Use `.github/agent-state/` as the audit trail:
 
 Guideline: store the full output in the log, and only a short, high-signal summary elsewhere.
 
+**Snapshot exclusions (automatic):**
+
+The snapshot function excludes operational artifacts from the directory-state diff:
+- `.github/agent-state/subagents/*.log` (run logs)
+- `.github/agent-state/subagents/*.workspace-state.txt` (state metadata)
+- `.github/agent-state/patches/*.patch` (generated patches)
+
+These files are never included in the generated patch.
+
 ---
 
 ## Timeout behavior
@@ -316,7 +352,7 @@ Guideline: store the full output in the log, and only a short, high-signal summa
 | `GitHub Copilot CLI is not installed` | CLI missing | Install and ensure `copilot` is on PATH |
 | `sqlite3 is required for agent run tracking` | `sqlite3` missing | Install sqlite3 and rerun |
 | `Authentication failed` | Token/auth issue | Re-authenticate with `gh auth login` |
-| `Tool denied` | Missing permission | Add `--allow-tool ...`, adjust deny patterns, or use `--allow-all-tools-unsafe` |
+| `Tool denied` | Tool is in the denylist | Check if the tool matches a static deny pattern or a `--deny-tool` flag |
 | `Invalid --agent value` | Agent name has invalid characters | Use alphanumeric, dot, hyphen, underscore only (max 64 chars, must start alphanumeric) |
 | `Missing value for --prompt (next argument looks like a flag)` | Flag used as value | Use `--prompt="--value"` form for values starting with `--` |
 | `Context file not found (resolved from repo root)` | Relative path not found from repo root | Paths are resolved from repo root, not CWD |

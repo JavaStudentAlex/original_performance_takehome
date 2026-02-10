@@ -73,16 +73,13 @@ Note:
     This wrapper enforces a hard max runtime of 1 hour per invocation.
 
 Required:
-    --prompt <prompt>           The prompt/task for the agent
+    --prompt <prompt>           The prompt/task for the agent (required unless using --prune-stale)
 
 Optional:
     --agent <name>              Custom agent name (from .github/agents/ or ~/.copilot/agents/)
     --model <model>             AI model override (default: $DEFAULT_MODEL)
     --workdir <path>            Working directory inside the repo
     --context-file <file>       File containing additional context to prepend to prompt
-    --tool-policy <policy>      Tool permission policy: 'allowlist' (default) or 'legacy-denylist'
-    --allow-all-tools-unsafe    Shortcut for --tool-policy=legacy-denylist
-    --allow-tool <tool>         Additional tool to allow (repeatable)
     --deny-tool <tool>          Additional tool to deny (repeatable)
     --max-inline-context-bytes <N>  Max context file size to inline (default: 65536)
     --allow-urls                Allow network access (--allow-all-urls)
@@ -95,6 +92,9 @@ Sandbox mode (--sandbox):
     --no-cleanup-on-success     Keep sandbox after successful run (default: clean up)
     --cleanup-on-failure        Remove sandbox even on failure (default: preserve for debug)
 
+Sandbox maintenance:
+    --prune-stale               Find and remove orphaned sandbox worktrees, then exit
+
 Output:
     --patch-out <path>          Where to write the patch (default: .github/agent-state/patches/<ts>-<agent>.patch)
 
@@ -105,9 +105,9 @@ Examples:
     $(basename "$0") --prompt "Refactor this" --context-file STEP.md
     $(basename "$0") --agent=memory-opt-expert --prompt "Optimize" --sandbox
 
-Tool Permission Examples:
-    $(basename "$0") --prompt "..." --allow-tool 'shell(npm run test:*)'
+Deny Tool Examples:
     $(basename "$0") --prompt "..." --deny-tool 'shell(docker)'
+    $(basename "$0") --prompt "..." --deny-tool 'shell(curl)'
 EOF
 }
 
@@ -149,6 +149,47 @@ run_with_timeout() {
     wait "$pid"
 }
 
+resolve_physical_file() {
+    # Resolve a path to a physical absolute file path by following symlinks.
+    # This avoids relying on platform-specific `realpath -f`.
+    local current="$1"
+    local depth=0
+    local link_target=""
+    local parent=""
+
+    [[ -e "$current" ]] || return 1
+
+    while [[ -L "$current" ]]; do
+        depth=$((depth + 1))
+        if (( depth > 40 )); then
+            return 1
+        fi
+        link_target="$(readlink "$current")" || return 1
+        if [[ "$link_target" = /* ]]; then
+            current="$link_target"
+        else
+            parent="$(cd -P "$(dirname "$current")" && pwd)" || return 1
+            current="$parent/$link_target"
+        fi
+    done
+
+    parent="$(cd -P "$(dirname "$current")" && pwd)" || return 1
+    printf '%s/%s\n' "$parent" "$(basename "$current")"
+}
+
+path_within_root() {
+    local target="$1"
+    local root="$2"
+    case "$target" in
+        "$root"|"$root"/*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # ==============================================================================
 # Argument Parsing
 # ==============================================================================
@@ -158,7 +199,6 @@ AGENT=""
 MODEL="$DEFAULT_MODEL"
 WORKDIR=""
 CONTEXT_FILE=""
-EXTRA_ALLOW_TOOLS=()
 EXTRA_DENY_TOOLS=()
 ALLOW_URLS="false"
 ALLOW_PATHS="false"
@@ -166,10 +206,10 @@ DRY_RUN="false"
 VERBOSE="false"
 PATCH_OUT=""
 MAX_INLINE_CONTEXT_BYTES=65536
-TOOL_POLICY="allowlist"
 USE_SANDBOX="false"
 SANDBOX_CLEANUP_ON_SUCCESS="true"
 SANDBOX_CLEANUP_ON_FAILURE="false"
+PRUNE_STALE="false"
 
 require_value() {
     local opt="$1"
@@ -216,11 +256,6 @@ while [[ $# -gt 0 ]]; do
             CONTEXT_FILE="$2"; shift 2 ;;
         --context-file=*)
             CONTEXT_FILE="${1#*=}"; shift ;;
-        --allow-tool)
-            require_value "--allow-tool" "$#" "${2:-}"
-            EXTRA_ALLOW_TOOLS+=("$2"); shift 2 ;;
-        --allow-tool=*)
-            EXTRA_ALLOW_TOOLS+=("${1#*=}"); shift ;;
         --deny-tool)
             require_value "--deny-tool" "$#" "${2:-}"
             EXTRA_DENY_TOOLS+=("$2"); shift 2 ;;
@@ -244,19 +279,14 @@ while [[ $# -gt 0 ]]; do
             MAX_INLINE_CONTEXT_BYTES="$2"; shift 2 ;;
         --max-inline-context-bytes=*)
             MAX_INLINE_CONTEXT_BYTES="${1#*=}"; shift ;;
-        --tool-policy)
-            require_value "--tool-policy" "$#" "${2:-}"
-            TOOL_POLICY="$2"; shift 2 ;;
-        --tool-policy=*)
-            TOOL_POLICY="${1#*=}"; shift ;;
-        --allow-all-tools-unsafe)
-            TOOL_POLICY="legacy-denylist"; shift ;;
         --sandbox)
             USE_SANDBOX="true"; shift ;;
         --no-cleanup-on-success)
             SANDBOX_CLEANUP_ON_SUCCESS="false"; shift ;;
         --cleanup-on-failure)
             SANDBOX_CLEANUP_ON_FAILURE="true"; shift ;;
+        --prune-stale)
+            PRUNE_STALE="true"; shift ;;
         --help|-h)
             print_usage; exit 0 ;;
         *)
@@ -267,12 +297,6 @@ done
 # ==============================================================================
 # Validation
 # ==============================================================================
-
-if [[ -z "$PROMPT" ]]; then
-    log_error "Missing required --prompt argument"
-    print_usage
-    exit 1
-fi
 
 # Validate agent name (P06): reject unsafe characters before any DB/sandbox work.
 # Allowed: alphanumeric, dot, hyphen, underscore. Must start with alphanumeric.
@@ -285,16 +309,40 @@ if [[ -n "$AGENT" ]]; then
     fi
 fi
 
-# Validate tool-policy value
-case "$TOOL_POLICY" in
-    allowlist|legacy-denylist) ;;
-    *)
-        log_error "Invalid --tool-policy: '$TOOL_POLICY' (must be 'allowlist' or 'legacy-denylist')"
-        exit 1
-        ;;
-esac
-
 ensure_in_git_repo
+
+# P07: Wrapper-owned prune mode.
+# Must run without --prompt and cannot be mixed with run options.
+if [[ "$PRUNE_STALE" == "true" ]]; then
+    if [[ -n "$PROMPT" ]] || [[ -n "$AGENT" ]] || [[ "$MODEL" != "$DEFAULT_MODEL" ]] || \
+       [[ -n "$WORKDIR" ]] || [[ -n "$CONTEXT_FILE" ]] || [[ ${#EXTRA_DENY_TOOLS[@]} -gt 0 ]] || \
+       [[ "$ALLOW_URLS" == "true" ]] || [[ "$ALLOW_PATHS" == "true" ]] || [[ "$DRY_RUN" == "true" ]] || \
+       [[ -n "$PATCH_OUT" ]] || [[ "$MAX_INLINE_CONTEXT_BYTES" != "65536" ]] || [[ "$USE_SANDBOX" == "true" ]] || \
+       [[ "$SANDBOX_CLEANUP_ON_SUCCESS" != "true" ]] || [[ "$SANDBOX_CLEANUP_ON_FAILURE" != "false" ]]; then
+        log_error "--prune-stale cannot be combined with run options"
+        print_usage
+        exit 1
+    fi
+    if [[ ! -x "$SCRIPTS_DIR/sandbox-cleanup.sh" ]]; then
+        log_error "Sandbox helper not found or not executable: $SCRIPTS_DIR/sandbox-cleanup.sh"
+        exit 1
+    fi
+    "$SCRIPTS_DIR/sandbox-cleanup.sh" --prune-stale
+    exit $?
+fi
+
+if [[ -z "$PROMPT" ]]; then
+    log_error "Missing required --prompt argument"
+    print_usage
+    exit 1
+fi
+
+# P04: Validate --max-inline-context-bytes is a positive integer
+if ! [[ "$MAX_INLINE_CONTEXT_BYTES" =~ ^[0-9]+$ ]] || [[ "$MAX_INLINE_CONTEXT_BYTES" -lt 1 ]]; then
+    log_error "Invalid --max-inline-context-bytes: '$MAX_INLINE_CONTEXT_BYTES' (must be a positive integer >= 1)"
+    exit 1
+fi
+
 if [[ "$DRY_RUN" != "true" ]]; then
     check_copilot_installed
     check_sqlite_installed
@@ -339,85 +387,17 @@ if [[ -n "$AGENT" ]]; then
     CMD+=(--agent="$AGENT")
 fi
 
-# --- Tool policy (P05/G02) ---
-# Conservative fallback allowlist when no agent-specific tools are found.
-DEFAULT_ALLOWLIST_TOOLS=(
-    "read"
-    "search"
-    "execute"
-    "edit"
-    "agent"
-    "todo"
-    "web"
-    "vscode"
-)
+# --- Tool policy: allow-all + denylist (P03) ---
+# All tools are allowed by default; destructive commands are denied.
+CMD+=(--allow-all-tools)
 
-log_verbose "Tool policy: $TOOL_POLICY"
-
-if [[ "$TOOL_POLICY" == "legacy-denylist" ]]; then
-    # Legacy mode: allow all tools, deny destructive ones (original behavior).
-    CMD+=(--allow-all-tools)
-    log_verbose "Tool policy: legacy-denylist (--allow-all-tools with deny patterns)"
-else
-    # Allowlist mode (default): build tool set from agent definition or fallback.
-    ALLOWLIST_TOOLS=()
-    ALLOWLIST_SOURCE=""
-
-    # Try to parse tools from agent definition file.
-    # Resolution order: user-global first, then repo-local.
-    AGENT_DEF_FILE=""
-    if [[ -n "$AGENT" ]]; then
-        if [[ -f "$HOME/.copilot/agents/${AGENT}.agent.md" ]]; then
-            AGENT_DEF_FILE="$HOME/.copilot/agents/${AGENT}.agent.md"
-        elif [[ -f "$(git rev-parse --show-toplevel 2>/dev/null)/.github/agents/${AGENT}.agent.md" ]]; then
-            AGENT_DEF_FILE="$(git rev-parse --show-toplevel)/.github/agents/${AGENT}.agent.md"
-        fi
-    fi
-
-    if [[ -n "$AGENT_DEF_FILE" ]]; then
-        # Parse tools from agent file: look for lines matching "- tool: <name>"
-        # or a YAML/markdown tools block. Simple line-based extraction.
-        while IFS= read -r line; do
-            # Match lines like "- tool: read" or "- read" under a tools section
-            tool_name=""
-            if [[ "$line" =~ ^[[:space:]]*-[[:space:]]+tool:[[:space:]]*(.+)$ ]]; then
-                tool_name="${BASH_REMATCH[1]}"
-            fi
-            if [[ -n "$tool_name" ]]; then
-                # Trim whitespace
-                tool_name="$(echo "$tool_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-                ALLOWLIST_TOOLS+=("$tool_name")
-            fi
-        done < "$AGENT_DEF_FILE"
-        if [[ ${#ALLOWLIST_TOOLS[@]} -gt 0 ]]; then
-            ALLOWLIST_SOURCE="agent-definition ($AGENT_DEF_FILE)"
-        fi
-    fi
-
-    if [[ ${#ALLOWLIST_TOOLS[@]} -eq 0 ]]; then
-        # No tools parsed from agent definition — use conservative fallback.
-        ALLOWLIST_TOOLS=("${DEFAULT_ALLOWLIST_TOOLS[@]}")
-        ALLOWLIST_SOURCE="default-fallback"
-    fi
-
-    # Add allowlist tools
-    for tool in "${ALLOWLIST_TOOLS[@]}"; do
-        CMD+=(--allow-tool "$tool")
-    done
-    log_verbose "Allowlist source: $ALLOWLIST_SOURCE"
-    log_verbose "Allowlist tools: ${ALLOWLIST_TOOLS[*]}"
-fi
-
-# Always apply deny patterns as defense-in-depth (both policies).
+# Apply static denylist
 for tool in "${DENIED_TOOLS[@]}"; do
     CMD+=(--deny-tool "$tool")
 done
+# Apply user-provided deny overrides
 for tool in "${EXTRA_DENY_TOOLS[@]}"; do
     CMD+=(--deny-tool "$tool")
-done
-# Extra allow-tools from CLI override (union with policy allowlist).
-for tool in "${EXTRA_ALLOW_TOOLS[@]}"; do
-    CMD+=(--allow-tool "$tool")
 done
 
 if [[ "$ALLOW_URLS" == "true" ]]; then
@@ -436,21 +416,15 @@ AGENT_FOR_NAMES="${AGENT:-auto}"
 TS="$(make_timestamp)"
 
 PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+PROJECT_ROOT_PHYS="$(cd -P "$PROJECT_ROOT" && pwd)"
 
-# --- Context-file resolution (P04/G03): repo-root-relative semantics ---
+# --- Context-file resolution (P04/G03): repo-root-relative semantics + symlink-safe containment ---
 CONTEXT_FILE_REPO_ABS=""
+CONTEXT_FILE_RESOLVED_ABS=""
 if [[ -n "$CONTEXT_FILE" ]]; then
     if [[ "$CONTEXT_FILE" = /* ]]; then
-        # Absolute path: must be inside repo root
-        case "$CONTEXT_FILE" in
-            "$PROJECT_ROOT"/*)
-                CONTEXT_FILE_REPO_ABS="$CONTEXT_FILE"
-                ;;
-            *)
-                log_error "--context-file absolute path must be inside the repo root ($PROJECT_ROOT): $CONTEXT_FILE"
-                exit 1
-                ;;
-        esac
+        # Absolute path: validate by resolved-path containment below.
+        CONTEXT_FILE_REPO_ABS="$CONTEXT_FILE"
     else
         # Relative path: resolve from PROJECT_ROOT (not caller CWD)
         case "$CONTEXT_FILE" in
@@ -461,8 +435,20 @@ if [[ -n "$CONTEXT_FILE" ]]; then
         esac
         CONTEXT_FILE_REPO_ABS="$PROJECT_ROOT/$CONTEXT_FILE"
     fi
-    if [[ ! -f "$CONTEXT_FILE_REPO_ABS" ]]; then
+    if [[ ! -e "$CONTEXT_FILE_REPO_ABS" ]]; then
         log_error "Context file not found: $CONTEXT_FILE_REPO_ABS (resolved from repo root)"
+        exit 1
+    fi
+    CONTEXT_FILE_RESOLVED_ABS="$(resolve_physical_file "$CONTEXT_FILE_REPO_ABS")" || {
+        log_error "Failed to resolve --context-file safely: $CONTEXT_FILE"
+        exit 1
+    }
+    if [[ ! -f "$CONTEXT_FILE_RESOLVED_ABS" ]]; then
+        log_error "--context-file must resolve to a regular file: $CONTEXT_FILE"
+        exit 1
+    fi
+    if ! path_within_root "$CONTEXT_FILE_RESOLVED_ABS" "$PROJECT_ROOT_PHYS"; then
+        log_error "--context-file resolves outside repo root (symlink escape blocked): $CONTEXT_FILE -> $CONTEXT_FILE_RESOLVED_ABS"
         exit 1
     fi
 fi
@@ -472,12 +458,12 @@ CONTRACT_DIRECTIVE="READ FIRST: .github/copilot-instructions.md"
 FULL_PROMPT="$CONTRACT_DIRECTIVE
 
 $PROMPT"
-if [[ -n "$CONTEXT_FILE_REPO_ABS" ]]; then
-    context_size=$(wc -c < "$CONTEXT_FILE_REPO_ABS")
+if [[ -n "$CONTEXT_FILE_RESOLVED_ABS" ]]; then
+    context_size=$(wc -c < "$CONTEXT_FILE_RESOLVED_ABS")
     log_verbose "Context file size: $context_size bytes (max inline: $MAX_INLINE_CONTEXT_BYTES)"
     if [[ "$context_size" -le "$MAX_INLINE_CONTEXT_BYTES" ]]; then
         # Small enough to inline
-        CONTEXT_CONTENT=$(cat "$CONTEXT_FILE_REPO_ABS")
+        CONTEXT_CONTENT=$(cat "$CONTEXT_FILE_RESOLVED_ABS")
         FULL_PROMPT="$CONTRACT_DIRECTIVE
 
 CONTEXT FROM FILE ($CONTEXT_FILE):
@@ -492,7 +478,7 @@ $PROMPT"
         log_warn "Context file exceeds ${MAX_INLINE_CONTEXT_BYTES} bytes ($context_size bytes). Using file-reference mode to avoid ARG_MAX issues."
         FULL_PROMPT="$CONTRACT_DIRECTIVE
 
-IMPORTANT: READ THIS FILE FIRST before starting work: $CONTEXT_FILE_REPO_ABS
+IMPORTANT: READ THIS FILE FIRST before starting work: $CONTEXT_FILE_RESOLVED_ABS
 (Context file too large to inline — $context_size bytes. You must read it using your file-read tool.)
 
 TASK:
@@ -510,9 +496,8 @@ fi
 
 log_verbose "Model: $MODEL"
 log_verbose "Agent: ${AGENT:-<auto>}"
-log_verbose "Tool policy: $TOOL_POLICY"
+log_verbose "Tool policy: allow-all + denylist"
 log_verbose "Denied tools: ${DENIED_TOOLS[*]} ${EXTRA_DENY_TOOLS[*]:-}"
-log_verbose "Extra allowed tools: ${EXTRA_ALLOW_TOOLS[*]:-<none>}"
 log_verbose "Max runtime: $TIMEOUT_HUMAN"
 log_verbose "Working directory: ${WORKDIR:-.}"
 log_verbose "Sandbox mode: $USE_SANDBOX"
@@ -567,16 +552,82 @@ if [[ "$USE_SANDBOX" == "true" ]]; then
     log_info "Sandbox created: $SANDBOX_DIR"
 fi
 
+# P01+P08: Unified run finalizer — called on EXIT to guarantee DB status update.
+# FINAL_STATUS defaults to "failed" so any unexpected exit marks the row correctly.
+FINAL_STATUS="failed"
+RUN_FINALIZED="false"
+ROW_ID=""
+ROW_ID_RAW=""
+ROW_INSERT_ATTEMPTED="false"
+
+finalize_run() {
+    # Guard against double finalization
+    if [[ "$RUN_FINALIZED" == "true" ]]; then
+        return 0
+    fi
+    RUN_FINALIZED="true"
+
+    # Validate FINAL_STATUS is a known value (defense-in-depth)
+    case "$FINAL_STATUS" in
+        completed|failed|interrupted) ;;
+        *) FINAL_STATUS="failed" ;;
+    esac
+
+    # Primary update path: update by explicit row id.
+    if [[ "$ROW_INSERT_ATTEMPTED" == "true" ]] && [[ -n "${ROW_ID:-}" ]] && [[ "$ROW_ID" =~ ^[0-9]+$ ]]; then
+        db_exec "$DB_FILE" \
+            "UPDATE agents SET agent_status=?1 WHERE id=?2;" \
+            "$FINAL_STATUS" "$ROW_ID" 2>/dev/null || true
+    fi
+
+    # P08 fallback: if row insert succeeded but ROW_ID was unusable, best-effort
+    # update only the latest matching running row for this run identity tuple.
+    if [[ "$ROW_INSERT_ATTEMPTED" == "true" ]] && { [[ -z "${ROW_ID:-}" ]] || ! [[ "$ROW_ID" =~ ^[0-9]+$ ]]; }; then
+        db_exec "$DB_FILE" \
+            "UPDATE agents
+             SET agent_status=?1
+             WHERE id = (
+                 SELECT id
+                 FROM agents
+                 WHERE agent_name=?2
+                   AND agent_path=?3
+                   AND agent_sandbox=?4
+                   AND agent_status='running'
+                 ORDER BY id DESC
+                 LIMIT 1
+             );" \
+            "$FINAL_STATUS" "$AGENT_FOR_NAMES" "$AGENT_PATH" "$SANDBOX_DIR" 2>/dev/null || true
+    fi
+
+    # Sandbox cleanup based on final status
+    if [[ "$USE_SANDBOX" == "true" ]] && [[ -n "${SANDBOX_DIR:-}" ]]; then
+        local should_cleanup="false"
+        if [[ "$FINAL_STATUS" == "completed" ]] && [[ "$SANDBOX_CLEANUP_ON_SUCCESS" == "true" ]]; then
+            should_cleanup="true"
+        elif [[ "$FINAL_STATUS" == "interrupted" ]]; then
+            should_cleanup="true"
+        elif [[ "$FINAL_STATUS" == "failed" ]] && [[ "$SANDBOX_CLEANUP_ON_FAILURE" == "true" ]]; then
+            should_cleanup="true"
+        fi
+        if [[ "$should_cleanup" == "true" ]]; then
+            "$SCRIPTS_DIR/sandbox-cleanup.sh" "$SANDBOX_DIR" 2>/dev/null || true
+        fi
+    fi
+}
+trap 'finalize_run' EXIT
+
 # Record agent run in database
-ROW_ID=$(db_query "$DB_FILE" \
+ROW_ID_RAW=$(db_query "$DB_FILE" \
     "INSERT INTO agents (agent_name, agent_path, agent_sandbox, agent_status)
      VALUES (?1, ?2, ?3, 'running');
      SELECT last_insert_rowid();" \
     "$AGENT_FOR_NAMES" "$AGENT_PATH" "$SANDBOX_DIR")
+ROW_INSERT_ATTEMPTED="true"
+ROW_ID="$(printf '%s' "$ROW_ID_RAW" | tr -d '[:space:]')"
 
-# Validate ROW_ID is numeric
+# Validate ROW_ID is numeric (EXIT trap is already active — safe to exit here)
 if ! [[ "$ROW_ID" =~ ^[0-9]+$ ]]; then
-    log_error "Failed to record agent run in database (got: $ROW_ID)"
+    log_error "Failed to record agent run in database (got: $ROW_ID_RAW)"
     exit 1
 fi
 log_verbose "Agent run recorded in agents.db (id=$ROW_ID)"
@@ -584,37 +635,16 @@ log_verbose "Agent run recorded in agents.db (id=$ROW_ID)"
 fail_after_run_registered() {
     local msg="$1"
     log_error "$msg"
-    db_exec "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=?1;" "$ROW_ID" || true
-    if [[ "$USE_SANDBOX" == "true" ]] && [[ -n "${SANDBOX_DIR:-}" ]] && [[ "$SANDBOX_CLEANUP_ON_FAILURE" == "true" ]]; then
-        "$SCRIPTS_DIR/sandbox-cleanup.sh" "$SANDBOX_DIR" || log_warn "Sandbox cleanup failed"
-    fi
+    # FINAL_STATUS is already "failed" by default; EXIT trap handles DB update and cleanup.
     exit 1
 }
 
 # P07+G04: Signal trap for cleanup on interrupt.
-# If the script is interrupted after the DB row is created but before the
-# final status update, mark the row as 'interrupted' and optionally clean up
-# the sandbox. RUN_FINALIZED guards against race with normal finalization.
-RUN_FINALIZED="false"
+# Sets FINAL_STATUS and exits; the EXIT trap calls finalize_run().
 cleanup_on_signal() {
     local sig="$1"
-    if [[ "$RUN_FINALIZED" == "true" ]]; then
-        # Normal finalization already completed; just exit with signal code.
-        case "$sig" in
-            INT)  exit 130 ;;
-            TERM) exit 143 ;;
-            HUP)  exit 129 ;;
-            *)    exit 1 ;;
-        esac
-    fi
-    log_warn "Received signal $sig — cleaning up agent run id=$ROW_ID..."
-    db_exec "$DB_FILE" \
-        "UPDATE agents SET agent_status='interrupted' WHERE id=?1;" \
-        "$ROW_ID" || true
-    if [[ "$USE_SANDBOX" == "true" ]] && [[ -n "${SANDBOX_DIR:-}" ]]; then
-        log_warn "Cleaning up sandbox after interruption: $SANDBOX_DIR"
-        "$SCRIPTS_DIR/sandbox-cleanup.sh" "$SANDBOX_DIR" 2>/dev/null || true
-    fi
+    FINAL_STATUS="interrupted"
+    log_warn "Received signal $sig — cleaning up agent run id=${ROW_ID:-?}..."
     case "$sig" in
         INT)  exit 130 ;;
         TERM) exit 143 ;;
@@ -722,31 +752,11 @@ then
     log_warn "Failed to write workspace state file: $STATE_OUT"
 fi
 
-# Update agent status in database
+# Set final status — EXIT trap calls finalize_run() which updates DB and handles sandbox.
 if [[ "$exit_code" -eq 0 ]]; then
-    db_exec "$DB_FILE" "UPDATE agents SET agent_status='completed' WHERE id=?1;" "$ROW_ID"
+    FINAL_STATUS="completed"
 else
-    db_exec "$DB_FILE" "UPDATE agents SET agent_status='failed' WHERE id=?1;" "$ROW_ID"
-fi
-
-# G04: Mark finalization complete and disarm signal trap to prevent race.
-RUN_FINALIZED="true"
-trap - INT TERM HUP
-
-# Sandbox cleanup
-if [[ "$USE_SANDBOX" == "true" ]] && [[ -n "$SANDBOX_DIR" ]]; then
-    should_cleanup="false"
-    if [[ "$exit_code" -eq 0 ]] && [[ "$SANDBOX_CLEANUP_ON_SUCCESS" == "true" ]]; then
-        should_cleanup="true"
-    elif [[ "$exit_code" -ne 0 ]] && [[ "$SANDBOX_CLEANUP_ON_FAILURE" == "true" ]]; then
-        should_cleanup="true"
-    fi
-    if [[ "$should_cleanup" == "true" ]]; then
-        log_info "Cleaning up sandbox: $SANDBOX_DIR"
-        "$SCRIPTS_DIR/sandbox-cleanup.sh" "$SANDBOX_DIR" || log_warn "Sandbox cleanup failed"
-    else
-        log_info "Sandbox preserved: $SANDBOX_DIR"
-    fi
+    FINAL_STATUS="failed"
 fi
 
 log_info "Done. Patch: $PATCH_OUT"

@@ -18,6 +18,53 @@ SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPTS_DIR/common-utils.sh"
 
 # ==============================================================================
+# Path Safety Helpers
+# ==============================================================================
+
+strip_trailing_slashes() {
+    local path="$1"
+    while [[ "$path" != "/" ]] && [[ "$path" == */ ]]; do
+        path="${path%/}"
+    done
+    printf '%s' "$path"
+}
+
+is_within_base() {
+    local target_real="$1"
+    local base_real="$2"
+    case "$target_real/" in
+        "$base_real/"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+resolve_path() {
+    # P05: Portable realpath replacement using cd -P / pwd -P.
+    # Returns the canonical physical path. Follows symlinks.
+    # Returns non-zero if the path does not exist.
+    local target="$1"
+    if command -v realpath &>/dev/null; then
+        realpath "$target"
+        return $?
+    fi
+    # Fallback: cd -P into the directory and use pwd -P
+    if [[ -d "$target" ]]; then
+        (cd -P "$target" && pwd -P)
+    elif [[ -e "$target" ]]; then
+        local dir base
+        dir="$(cd -P "$(dirname "$target")" && pwd -P)" || return 1
+        base="$(basename "$target")"
+        printf '%s/%s\n' "$dir" "$base"
+    else
+        return 1
+    fi
+}
+
+# ==============================================================================
 # Main
 # ==============================================================================
 
@@ -39,15 +86,49 @@ if [[ "${1:-}" == "--prune-stale" ]]; then
         exit 0
     fi
 
+    SANDBOX_BASE_REAL="$(resolve_path "$SANDBOX_BASE")"
     stale_count=0
-    for dir in "$SANDBOX_BASE"/*/; do
-        [[ -d "$dir" ]] || continue
-        # Check if this is still a valid worktree
-        if ! git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
-            log_info "Pruning stale sandbox: $dir"
-            rm -rf "$dir"
+    shopt -s nullglob
+    sandbox_entries=("$SANDBOX_BASE"/*)
+    shopt -u nullglob
+
+    for entry in "${sandbox_entries[@]}"; do
+        entry_norm="$(strip_trailing_slashes "$entry")"
+        [[ -e "$entry_norm" ]] || [[ -L "$entry_norm" ]] || continue
+
+        # Never traverse symlinks in prune mode.
+        if [[ -L "$entry_norm" ]]; then
+            log_warn "Pruning symlink entry without traversal: $entry_norm"
+            rm -f -- "$entry_norm"
             stale_count=$((stale_count + 1))
+            continue
         fi
+
+        [[ -d "$entry_norm" ]] || continue
+
+        entry_real="$(resolve_path "$entry_norm" 2>/dev/null || true)"
+        if [[ -z "$entry_real" ]]; then
+            log_warn "Skipping entry with unresolved realpath: $entry_norm"
+            continue
+        fi
+
+        # A valid sandbox worktree reports itself as its own git top-level.
+        entry_toplevel="$(git -C "$entry_norm" rev-parse --show-toplevel 2>/dev/null || true)"
+        entry_toplevel_real=""
+        if [[ -n "$entry_toplevel" ]]; then
+            entry_toplevel_real="$(resolve_path "$entry_toplevel" 2>/dev/null || true)"
+        fi
+        if [[ "$entry_toplevel_real" == "$entry_real" ]]; then
+            continue
+        fi
+
+        if ! is_within_base "$entry_real" "$SANDBOX_BASE_REAL"; then
+            log_error "Refusing prune outside sandbox base: $entry_norm (resolved: $entry_real)"
+            continue
+        fi
+        log_info "Pruning stale sandbox: $entry_norm"
+        rm -rf -- "$entry_norm"
+        stale_count=$((stale_count + 1))
     done
 
     # Also prune git's worktree bookkeeping
@@ -60,25 +141,22 @@ fi
 SANDBOX_DIR="$1"
 PROJECT_ROOT="$(git rev-parse --show-toplevel)"
 SANDBOX_BASE="$PROJECT_ROOT/.agent-sandboxes"
+SANDBOX_DIR_NORM="$(strip_trailing_slashes "$SANDBOX_DIR")"
 
-if [[ ! -d "$SANDBOX_DIR" ]]; then
-    log_error "Sandbox directory not found: $SANDBOX_DIR"
+if [[ ! -d "$SANDBOX_DIR_NORM" ]]; then
+    log_error "Sandbox directory not found: $SANDBOX_DIR_NORM"
     exit 1
 fi
 
 # Canonicalize paths to prevent directory traversal (e.g., ../../etc)
-SANDBOX_DIR_REAL="$(realpath "$SANDBOX_DIR")"
-SANDBOX_BASE_REAL="$(realpath "$SANDBOX_BASE" 2>/dev/null || echo "$SANDBOX_BASE")"
+SANDBOX_DIR_REAL="$(resolve_path "$SANDBOX_DIR_NORM")"
+SANDBOX_BASE_REAL="$(resolve_path "$SANDBOX_BASE" 2>/dev/null || echo "$SANDBOX_BASE")"
 
 # Refuse cleanup if the resolved path is outside sandbox base.
-case "$SANDBOX_DIR_REAL/" in
-    "$SANDBOX_BASE_REAL/"*)
-        ;;
-    *)
-        log_error "Refusing cleanup outside sandbox base: $SANDBOX_DIR (resolved: $SANDBOX_DIR_REAL)"
-        exit 1
-        ;;
-esac
+if ! is_within_base "$SANDBOX_DIR_REAL" "$SANDBOX_BASE_REAL"; then
+    log_error "Refusing cleanup outside sandbox base: $SANDBOX_DIR_NORM (resolved: $SANDBOX_DIR_REAL)"
+    exit 1
+fi
 
 # Get the branch name before removing worktree
 BRANCH_NAME=""

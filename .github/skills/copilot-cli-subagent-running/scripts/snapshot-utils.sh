@@ -17,7 +17,13 @@ snapshot_directory_state() {
     tmpdir="$(mktemp -d -t subagent-index.XXXXXX)"
     idx="$tmpdir/index"
 
-    if ! GIT_INDEX_FILE="$idx" git -C "$repo" add -A >/dev/null 2>&1; then
+    # P02: Exclude operational artifacts from snapshots to prevent log/patch contamination.
+    if ! GIT_INDEX_FILE="$idx" git -C "$repo" add -A \
+            -- . \
+            ':(exclude).github/agent-state/subagents/*.log' \
+            ':(exclude).github/agent-state/subagents/*.workspace-state.txt' \
+            ':(exclude).github/agent-state/patches/*.patch' \
+            >/dev/null 2>&1; then
         log_error "snapshot_directory_state: git add failed in $repo"
         rm -rf "$tmpdir"
         return 1
